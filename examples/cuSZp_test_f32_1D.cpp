@@ -1,23 +1,19 @@
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <math.h>
+
 #include <cuda_runtime.h>
 #include <cuSZp.h>
 
 int main()
 {
-    // For measuring the end-to-end throughput.
-    TimingGPU timer_GPU;
-
     // Input data preparation on CPU.
     float* oriData = NULL;
     float* decData = NULL;
     unsigned char* cmpBytes = NULL;
     size_t nbEle = 1024*1024*512; // 2 GB fp32 data.
-    size_t cmpSize1 = 0;
     size_t cmpSize2 = 0;
-    size_t cmpSize3 = 0;
     oriData = (float*)malloc(nbEle*sizeof(float));
     decData = (float*)malloc(nbEle*sizeof(float));
     cmpBytes = (unsigned char*)malloc(nbEle*sizeof(float));
@@ -29,7 +25,7 @@ int main()
     float endValue = 20.0f;
     size_t idx = 0;
     float value = startValue;
-    while (idx < nbEle) 
+    while (idx < nbEle)
     {
         oriData[idx++] = value;
         value += step;
@@ -67,40 +63,73 @@ int main()
     // Warmup for NVIDIA GPU.
     for(int i=0; i<3; i++)
     {
-        cuSZp_compress(d_oriData, d_cmpBytes, nbEle, &cmpSize1, errorBound, CUSZP_DIM_1D, {0, 0, 0}, CUSZP_TYPE_FLOAT, CUSZP_MODE_FIXED, stream);
-        cuSZp_decompress(d_decData, d_cmpBytes, nbEle, cmpSize1, errorBound, CUSZP_DIM_1D, {0, 0, 0}, CUSZP_TYPE_FLOAT, CUSZP_MODE_FIXED, stream);
-        cudaMemset(d_cmpBytes, 0, sizeof(float)*nbEle);
+        cuSZp_compress_1D_plain_f32(d_oriData, d_cmpBytes, nbEle, &cmpSize2, errorBound, stream);
+        cuSZp_decompress_1D_plain_f32(d_decData, d_cmpBytes, nbEle, cmpSize2, errorBound, stream);
+        cudaStreamSynchronize(stream);
+        cudaMemsetAsync(d_cmpBytes, 0, sizeof(float)*nbEle, stream);
+        cudaStreamSynchronize(stream);
     }
 
-    // cuSZp-f testing.
+    // cuSZp-p testing.
     printf("=================================================\n");
-    printf("========Testing cuSZp-f-1D-f32 on REL 1E-2=======\n");
+    printf("========Testing cuSZp-p-1D-f32 on REL 1E-2=======\n");
     printf("=================================================\n");
+
+    cudaEvent_t cmpStart, cmpStop, decStart, decStop;
+    cudaEventCreate(&cmpStart);
+    cudaEventCreate(&cmpStop);
+    cudaEventCreate(&decStart);
+    cudaEventCreate(&decStop);
+
     // cuSZp compression.
-    timer_GPU.StartCounter(); // set timer
-    cuSZp_compress_1D_fixed_f32(d_oriData, d_cmpBytes, nbEle, &cmpSize1, errorBound, stream);
-    float cmpTime = timer_GPU.GetCounter();
+    cudaEventRecord(cmpStart, stream);
+    cuSZp_compress_1D_plain_f32(d_oriData, d_cmpBytes, nbEle, &cmpSize2, errorBound, stream);
+    cudaEventRecord(cmpStop, stream);
+    cudaEventSynchronize(cmpStop);
+    float cmpTime = 0.0f;
+    cudaEventElapsedTime(&cmpTime, cmpStart, cmpStop);
+
+    if (cmpSize2 == 0 || cmpSize2 > nbEle * sizeof(float))
+    {
+        fprintf(stderr, "Invalid cmpSize2=%zu\n", cmpSize2);
+        cudaEventDestroy(cmpStart);
+        cudaEventDestroy(cmpStop);
+        cudaEventDestroy(decStart);
+        cudaEventDestroy(decStop);
+        cudaFree(d_oriData);
+        cudaFree(d_decData);
+        cudaFree(d_cmpBytes);
+        cudaStreamDestroy(stream);
+        free(oriData);
+        free(decData);
+        free(cmpBytes);
+        return EXIT_FAILURE;
+    }
 
     // Transfer compressed data to CPU then back to GPU, making sure compression ratio is correct.
     // No need to add this part for real-world usages, this is only for testing compresion ratio correcness.
-    unsigned char* cmpBytes_dup1 = (unsigned char*)malloc(cmpSize1*sizeof(unsigned char));
-    cudaMemcpy(cmpBytes_dup1, d_cmpBytes, cmpSize1*sizeof(unsigned char), cudaMemcpyDeviceToHost);
-    cudaMemset(d_cmpBytes, 0, sizeof(float)*nbEle); // set to zero for double check.
-    cudaMemcpy(d_cmpBytes, cmpBytes_dup1, cmpSize1*sizeof(unsigned char), cudaMemcpyHostToDevice);
-        
+    unsigned char* cmpBytes_dup2 = (unsigned char*)malloc(cmpSize2*sizeof(unsigned char));
+    cudaMemcpyAsync(cmpBytes_dup2, d_cmpBytes, cmpSize2*sizeof(unsigned char), cudaMemcpyDeviceToHost, stream);
+    cudaMemsetAsync(d_cmpBytes, 0, sizeof(float)*nbEle, stream); // set to zero for double check.
+    cudaMemcpyAsync(d_cmpBytes, cmpBytes_dup2, cmpSize2*sizeof(unsigned char), cudaMemcpyHostToDevice, stream);
+    cudaStreamSynchronize(stream);
+
     // cuSZp decompression.
-    timer_GPU.StartCounter(); // set timer
-    cuSZp_decompress_1D_fixed_f32(d_decData, d_cmpBytes, nbEle, cmpSize1, errorBound, stream);
-    float decTime = timer_GPU.GetCounter();
+    cudaEventRecord(decStart, stream);
+    cuSZp_decompress_1D_plain_f32(d_decData, d_cmpBytes, nbEle, cmpSize2, errorBound, stream);
+    cudaEventRecord(decStop, stream);
+    cudaEventSynchronize(decStop);
+    float decTime = 0.0f;
+    cudaEventElapsedTime(&decTime, decStart, decStop);
 
     // Print result.
-    printf("cuSZp-f finished!\n");
-    printf("cuSZp-f compression   end-to-end speed: %f GB/s\n", (nbEle*sizeof(float)/1024.0/1024.0)/cmpTime);
-    printf("cuSZp-f decompression end-to-end speed: %f GB/s\n", (nbEle*sizeof(float)/1024.0/1024.0)/decTime);
-    printf("cuSZp-f compression ratio: %f\n", (nbEle*sizeof(float)/1024.0/1024.0)/(cmpSize1*sizeof(unsigned char)/1024.0/1024.0));
-    
-    // Error check
-    cudaMemcpy(cmpBytes, d_cmpBytes, cmpSize1*sizeof(unsigned char), cudaMemcpyDeviceToHost);
+    printf("cuSZp-p finished!\n");
+    printf("cuSZp-p compression   end-to-end speed: %f GB/s\n", (nbEle*sizeof(float)/1024.0/1024.0)/cmpTime);
+    printf("cuSZp-p decompression end-to-end speed: %f GB/s\n", (nbEle*sizeof(float)/1024.0/1024.0)/decTime);
+    printf("cuSZp-p compression ratio: %f\n", (nbEle*sizeof(float)/1024.0/1024.0)/(cmpSize2*sizeof(unsigned char)/1024.0/1024.0));
+
+    // Error check.
+    cudaMemcpy(cmpBytes, d_cmpBytes, cmpSize2*sizeof(unsigned char), cudaMemcpyDeviceToHost);
     cudaMemcpy(decData, d_decData, sizeof(float)*nbEle, cudaMemcpyDeviceToHost);
     int not_bound = 0;
     for(size_t i=0; i<nbEle; i++)
@@ -113,100 +142,16 @@ int main()
     }
     if(!not_bound) printf("\033[0;32mPass error check!\033[0m\n");
     else printf("\033[0;31mFail error check! Exceeding data count: %d\033[0m\n", not_bound);
-    printf("\033[1mDone with testing cuSZp-f on REL 1E-2!\033[0m\n\n");
-
-    // cuSZp-p testing.
-    printf("=================================================\n");
-    printf("========Testing cuSZp-p-1D-f32 on REL 1E-2=======\n");
-    printf("=================================================\n");
-    // cuSZp compression.
-    timer_GPU.StartCounter(); // set timer
-    cuSZp_compress_1D_plain_f32(d_oriData, d_cmpBytes, nbEle, &cmpSize2, errorBound, stream);
-    cmpTime = timer_GPU.GetCounter();
-
-    // Transfer compressed data to CPU then back to GPU, making sure compression ratio is correct.
-    // No need to add this part for real-world usages, this is only for testing compresion ratio correcness.
-    unsigned char* cmpBytes_dup2 = (unsigned char*)malloc(cmpSize2*sizeof(unsigned char));
-    cudaMemcpy(cmpBytes_dup2, d_cmpBytes, cmpSize2*sizeof(unsigned char), cudaMemcpyDeviceToHost);
-    cudaMemset(d_cmpBytes, 0, sizeof(float)*nbEle); // set to zero for double check.
-    cudaMemcpy(d_cmpBytes, cmpBytes_dup2, cmpSize2*sizeof(unsigned char), cudaMemcpyHostToDevice);
-        
-    // cuSZp decompression.
-    timer_GPU.StartCounter(); // set timer
-    cuSZp_decompress_1D_plain_f32(d_decData, d_cmpBytes, nbEle, cmpSize2, errorBound, stream);
-    decTime = timer_GPU.GetCounter();
-
-    // Print result.
-    printf("cuSZp-p finished!\n");
-    printf("cuSZp-p compression   end-to-end speed: %f GB/s\n", (nbEle*sizeof(float)/1024.0/1024.0)/cmpTime);
-    printf("cuSZp-p decompression end-to-end speed: %f GB/s\n", (nbEle*sizeof(float)/1024.0/1024.0)/decTime);
-    printf("cuSZp-p compression ratio: %f\n", (nbEle*sizeof(float)/1024.0/1024.0)/(cmpSize2*sizeof(unsigned char)/1024.0/1024.0));
-    
-    // Error check
-    cudaMemcpy(cmpBytes, d_cmpBytes, cmpSize2*sizeof(unsigned char), cudaMemcpyDeviceToHost);
-    cudaMemcpy(decData, d_decData, sizeof(float)*nbEle, cudaMemcpyDeviceToHost);
-    not_bound = 0;
-    for(size_t i=0; i<nbEle; i++)
-    {
-        if(fabs(oriData[i]-decData[i]) > errorBound*1.1)
-        {
-            not_bound++;
-            // printf("not bound: %zu oriData: %f, decData: %f, errors: %f, bound: %f\n", i, oriData[i], decData[i], fabs(oriData[i]-decData[i]), errorBound);
-        }
-    }
-    if(!not_bound) printf("\033[0;32mPass error check!\033[0m\n");
-    else printf("\033[0;31mFail error check! Exceeding data count: %d\033[0m\n", not_bound);
-    printf("\033[1mDone with testing cuSZp-p on REL 1E-2!\033[0m\n\n");
-
-    // cuSZp-o testing.
-    printf("=================================================\n");
-    printf("========Testing cuSZp-o-1D-f32 on REL 1E-2=======\n");
-    printf("=================================================\n");
-    // cuSZp compression.
-    timer_GPU.StartCounter(); // set timer
-    cuSZp_compress_1D_outlier_f32(d_oriData, d_cmpBytes, nbEle, &cmpSize3, errorBound, stream);
-    cmpTime = timer_GPU.GetCounter();
-
-    // Transfer compressed data to CPU then back to GPU, making sure compression ratio is correct.
-    // No need to add this part for real-world usages, this is only for testing compresion ratio correcness.
-    unsigned char* cmpBytes_dup3 = (unsigned char*)malloc(cmpSize3*sizeof(unsigned char));
-    cudaMemcpy(cmpBytes_dup3, d_cmpBytes, cmpSize3*sizeof(unsigned char), cudaMemcpyDeviceToHost);
-    cudaMemset(d_cmpBytes, 0, sizeof(float)*nbEle); // set to zero for double check.
-    cudaMemcpy(d_cmpBytes, cmpBytes_dup3, cmpSize3*sizeof(unsigned char), cudaMemcpyHostToDevice);
-        
-    // cuSZp decompression.
-    timer_GPU.StartCounter(); // set timer
-    cuSZp_decompress_1D_outlier_f32(d_decData, d_cmpBytes, nbEle, cmpSize3, errorBound, stream);
-    decTime = timer_GPU.GetCounter();
-
-    // Print result.
-    printf("cuSZp-o finished!\n");
-    printf("cuSZp-o compression   end-to-end speed: %f GB/s\n", (nbEle*sizeof(float)/1024.0/1024.0)/cmpTime);
-    printf("cuSZp-o decompression end-to-end speed: %f GB/s\n", (nbEle*sizeof(float)/1024.0/1024.0)/decTime);
-    printf("cuSZp-o compression ratio: %f\n", (nbEle*sizeof(float)/1024.0/1024.0)/(cmpSize3*sizeof(unsigned char)/1024.0/1024.0));
-
-    // Error check
-    cudaMemcpy(cmpBytes, d_cmpBytes, cmpSize3*sizeof(unsigned char), cudaMemcpyDeviceToHost);
-    cudaMemcpy(decData, d_decData, sizeof(float)*nbEle, cudaMemcpyDeviceToHost);
-    not_bound = 0;
-    for(size_t i=0; i<nbEle; i++)
-    {
-        if(fabs(oriData[i]-decData[i]) > errorBound*1.1)
-        {
-            not_bound++;
-            // printf("not bound: %zu oriData: %f, decData: %f, errors: %f, bound: %f\n", i, oriData[i], decData[i], fabs(oriData[i]-decData[i]), errorBound);
-        }
-    }
-    if(!not_bound) printf("\033[0;32mPass error check!\033[0m\n");
-    else printf("\033[0;31mFail error check! Exceeding data count: %d\033[0m\n", not_bound);
-    printf("\033[1mDone with testing cuSZp-o on REL 1E-2!\033[0m\n");
+    printf("\033[1mDone with testing cuSZp-p on REL 1E-2!\033[0m\n");
 
     free(oriData);
     free(decData);
     free(cmpBytes);
-    free(cmpBytes_dup1);
     free(cmpBytes_dup2);
-    free(cmpBytes_dup3);
+    cudaEventDestroy(cmpStart);
+    cudaEventDestroy(cmpStop);
+    cudaEventDestroy(decStart);
+    cudaEventDestroy(decStop);
     cudaFree(d_oriData);
     cudaFree(d_decData);
     cudaFree(d_cmpBytes);
