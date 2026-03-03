@@ -121,6 +121,8 @@ void cuSZp_compress_1D_plain_f32(float* d_oriData, unsigned char* d_cmpBytes, si
     int* d_flag = NULL;
     unsigned int glob_sync = 0;
     cudaError_t err = cudaSuccess;
+    dim3 blockSize;
+    dim3 gridSize;
 
     err = cudaMalloc((void**)&d_cmpOffset, sizeof(unsigned int)*cmpOffSize);
     if (err != cudaSuccess) {
@@ -166,8 +168,8 @@ void cuSZp_compress_1D_plain_f32(float* d_oriData, unsigned char* d_cmpBytes, si
     }
 
     // cuSZp GPU compression.
-    dim3 blockSize(bsize);
-    dim3 gridSize(gsize);
+    blockSize = dim3(bsize);
+    gridSize = dim3(gsize);
     cuSZp_compress_kernel_1D_plain_f32<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_oriData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
     err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -228,6 +230,8 @@ void cuSZp_decompress_1D_plain_f32(float* d_decData, unsigned char* d_cmpBytes, 
     unsigned int* d_locOffset = NULL;
     int* d_flag = NULL;
     cudaError_t err = cudaSuccess;
+    dim3 blockSize;
+    dim3 gridSize;
 
     err = cudaMalloc((void**)&d_cmpOffset, sizeof(unsigned int)*cmpOffSize);
     if (err != cudaSuccess) {
@@ -267,8 +271,8 @@ void cuSZp_decompress_1D_plain_f32(float* d_decData, unsigned char* d_cmpBytes, 
     }
 
     // cuSZp GPU decompression.
-    dim3 blockSize(bsize);
-    dim3 gridSize(gsize);
+    blockSize = dim3(bsize);
+    gridSize = dim3(gsize);
     cuSZp_decompress_kernel_1D_plain_f32<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_decData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
     err = cudaGetLastError();
     if (err != cudaSuccess) {
