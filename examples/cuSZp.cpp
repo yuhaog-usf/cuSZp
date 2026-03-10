@@ -37,8 +37,8 @@ int main(int argc, char* argv[])
         printf("                       outlier  : Outlier fixed-length encoding mode (with delta and outlier preservation)\n");
         printf("  -d  [dim]            Data dimensionality and processing manner. Options:\n");
         printf("                       1                         : 1D Processing Manner (can be used for all datasets)\n");
-        printf("                       2 [dim_z] [dim_y] [dim_z] : 2D Processing Manner (can be used for both 2D and 3D datasets)\n");
-        printf("                       3 [dim_z] [dim_y] [dim_z] : 3D Processing Manner (can be used for only 3D datasets)\n");
+        printf("                       2 [dim_z] [dim_y] [dim_x] : 2D Processing Manner (can be used for both 2D and 3D datasets)\n");
+        printf("                       3 [dim_z] [dim_y] [dim_x] : 3D Processing Manner (can be used for only 3D datasets)\n");
         printf("                       Note: dim_x is the fastest varying dimension.\n");
         printf("                       Hint: 2D processing can be used for 3D datasets by compressing each [dim_y x dim_x] slice independently.\n");
         printf("  -eb [errorBoundMode] [errorBound]\n");
