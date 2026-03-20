@@ -11,4 +11,9 @@ __global__ void cuSZp_decompress_kernel_1D_plain_f32(float* const __restrict__ d
 __global__ void cuSZp_compress_kernel_1D_outlier_f32(const float* const __restrict__ oriData, unsigned char* const __restrict__ cmpData, volatile unsigned int* const __restrict__ cmpOffset, volatile unsigned int* const __restrict__ locOffset, volatile int* const __restrict__ flag, const float eb, const size_t nbEle);
 __global__ void cuSZp_decompress_kernel_1D_outlier_f32(float* const __restrict__ decData, const unsigned char* const __restrict__ cmpData, volatile unsigned int* const __restrict__ cmpOffset, volatile unsigned int* const __restrict__ locOffset, volatile int* const __restrict__ flag, const float eb, const size_t nbEle);
 
+// Block-size=64 variants (2 warps per block, per-warp lookback).
+static const int tblock_size_64 = 64;
+__global__ void cuSZp_compress_kernel_1D_plain_f32_blk64(const float* const __restrict__ oriData, unsigned char* const __restrict__ cmpData, volatile unsigned int* const __restrict__ cmpOffset, volatile unsigned int* const __restrict__ locOffset, volatile int* const __restrict__ flag, const float eb, const size_t nbEle);
+__global__ void cuSZp_decompress_kernel_1D_plain_f32_blk64(float* const __restrict__ decData, const unsigned char* const __restrict__ cmpData, volatile unsigned int* const __restrict__ cmpOffset, volatile unsigned int* const __restrict__ locOffset, volatile int* const __restrict__ flag, const float eb, const size_t nbEle);
+
 #endif // CUSZP_INCLUDE_CUSZP_CUSZP_KERNELS_1D_F32_H
