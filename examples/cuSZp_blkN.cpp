@@ -1,14 +1,14 @@
 /*
- * cuSZp_blk64.cu — cuSZp block-size=64 GPU benchmark
+ * cuSZp_blkN.cu — cuSZp variable block-size GPU benchmark
  *
- * Benchmarks cuSZp plain-1D-f32 with tblock_size=64.
+ * Benchmarks cuSZp plain-1D-f32 with tblock_size={32, 64, 128, 256}.
  *
  * Usage:
- *   ./cuSZp_blk64 -i <datafile> -eb <rel|abs> <bound> [-w <warmup>] [-r <repeat>]
+ *   ./cuSZp_blkN -i <datafile> -eb <rel|abs> <bound> [-w <warmup>] [-r <repeat>]
  *
  * Examples:
- *   ./cuSZp_blk64 -i pressure_3000 -eb rel 1e-3
- *   ./cuSZp_blk64 -i pressure_3000 -eb abs 1e-4 -w 5 -r 20
+ *   ./cuSZp_blkN -i pressure_3000 -eb rel 1e-3
+ *   ./cuSZp_blkN -i pressure_3000 -eb abs 1e-4 -w 5 -r 20
  *
  * Output: human-readable table + CSV on stdout.
  */
@@ -143,7 +143,7 @@ int main(int argc, char **argv)
     double rawMiB = (double)rawBytes / 1024.0 / 1024.0;
 
     printf("======================================================\n");
-    printf("  cuSZp Block-Size=64 GPU Benchmark\n");
+    printf("  cuSZp Variable Block-Size GPU Benchmark\n");
     printf("======================================================\n");
     printf("  Dataset   : %s\n", oriFilePath);
     printf("  Elements  : %zu (%.2f MB)\n", nbEle, (double)rawBytes / 1e6);
@@ -176,91 +176,93 @@ int main(int argc, char **argv)
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
-    size_t cmpSize = 0;
-    float elapsed = 0.0f;
+    /* Block sizes to benchmark */
+    int block_sizes[] = {32, 64, 128, 256};
+    int num_block_sizes = 4;
 
-    /* Warmup */
-    printf("Warming up (%d iterations)...\n", warmup);
-    for (int w = 0; w < warmup; w++) {
+    /* Human-readable table header */
+    printf("%-8s  %10s  %12s  %12s  %12s  %12s  %12s  %12s  %s\n",
+           "BlkSize", "CR", "Comp(GB/s)", "Comp_P95", "Decomp(GB/s)", "Dec_P95", "MaxAbsErr", "PSNR(dB)", "Check");
+    printf("--------  ----------  ------------  ------------  ------------  ------------  ------------  ------------  -----\n");
+
+    /* CSV header */
+    printf("\n# CSV_START\n");
+    printf("dataset,elements,valueRange,errMode,userBound,absErr,warmup,repeat,"
+           "blockSize,CR,cmpBytes,"
+           "comp_median_GBs,comp_p95_GBs,comp_min_GBs,"
+           "decomp_median_GBs,decomp_p95_GBs,decomp_min_GBs,"
+           "maxAbsErr,maxRelErr,PSNR\n");
+
+    for (int bi = 0; bi < num_block_sizes; bi++) {
+        int bs = block_sizes[bi];
+        size_t cmpSize = 0;
+        float elapsed = 0.0f;
+
+        /* Warmup */
+        for (int w = 0; w < warmup; w++) {
+            cudaMemsetAsync(d_cmpBytes, 0, cmpBufSize, stream);
+            cuSZp_compress_1D_plain_f32_blkN(d_oriData, d_cmpBytes, nbEle, &cmpSize, absErr, bs, stream);
+            cuSZp_decompress_1D_plain_f32_blkN(d_decData, d_cmpBytes, nbEle, cmpSize, absErr, bs, stream);
+            cudaStreamSynchronize(stream);
+        }
+
+        /* Timed compress */
+        for (int r = 0; r < repeat; r++) {
+            cudaMemsetAsync(d_cmpBytes, 0, cmpBufSize, stream);
+            cudaStreamSynchronize(stream);
+            cudaEventRecord(start, stream);
+            cuSZp_compress_1D_plain_f32_blkN(d_oriData, d_cmpBytes, nbEle, &cmpSize, absErr, bs, stream);
+            cudaEventRecord(stop, stream);
+            cudaEventSynchronize(stop);
+            cudaEventElapsedTime(&elapsed, start, stop);
+            comp_times[r] = elapsed;
+        }
+
+        if (cmpSize == 0 || cmpSize > rawBytes) {
+            printf("%-8d  SKIP (invalid cmpSize=%zu)\n", bs, cmpSize);
+            continue;
+        }
+
+        /* D2H -> zero -> H2D round-trip (matching cuSZp.cpp / cuSZp_test pattern) */
+        cudaMemcpyAsync(cmpBytes_dup, d_cmpBytes, cmpSize, cudaMemcpyDeviceToHost, stream);
         cudaMemsetAsync(d_cmpBytes, 0, cmpBufSize, stream);
-        cuSZp_compress_1D_plain_f32_blk64(d_oriData, d_cmpBytes, nbEle, &cmpSize, absErr, stream);
-        cuSZp_decompress_1D_plain_f32_blk64(d_decData, d_cmpBytes, nbEle, cmpSize, absErr, stream);
+        cudaMemcpyAsync(d_cmpBytes, cmpBytes_dup, cmpSize, cudaMemcpyHostToDevice, stream);
         cudaStreamSynchronize(stream);
-    }
 
-    /* Timed compress */
-    printf("Benchmarking (%d iterations)...\n", repeat);
-    for (int r = 0; r < repeat; r++) {
-        cudaMemsetAsync(d_cmpBytes, 0, cmpBufSize, stream);
-        cudaStreamSynchronize(stream);
-        cudaEventRecord(start, stream);
-        cuSZp_compress_1D_plain_f32_blk64(d_oriData, d_cmpBytes, nbEle, &cmpSize, absErr, stream);
-        cudaEventRecord(stop, stream);
-        cudaEventSynchronize(stop);
-        cudaEventElapsedTime(&elapsed, start, stop);
-        comp_times[r] = elapsed;
-    }
+        /* Timed decompress */
+        for (int r = 0; r < repeat; r++) {
+            cudaEventRecord(start, stream);
+            cuSZp_decompress_1D_plain_f32_blkN(d_decData, d_cmpBytes, nbEle, cmpSize, absErr, bs, stream);
+            cudaEventRecord(stop, stream);
+            cudaEventSynchronize(stop);
+            cudaEventElapsedTime(&elapsed, start, stop);
+            decomp_times[r] = elapsed;
+        }
 
-    if (cmpSize == 0 || cmpSize > rawBytes) {
-        printf("SKIP (invalid cmpSize=%zu)\n", cmpSize);
-        goto cleanup;
-    }
-
-    /* D2H -> zero -> H2D round-trip (matching cuSZp.cpp / cuSZp_test pattern) */
-    cudaMemcpyAsync(cmpBytes_dup, d_cmpBytes, cmpSize, cudaMemcpyDeviceToHost, stream);
-    cudaMemsetAsync(d_cmpBytes, 0, cmpBufSize, stream);
-    cudaMemcpyAsync(d_cmpBytes, cmpBytes_dup, cmpSize, cudaMemcpyHostToDevice, stream);
-    cudaStreamSynchronize(stream);
-
-    /* Timed decompress */
-    for (int r = 0; r < repeat; r++) {
-        cudaEventRecord(start, stream);
-        cuSZp_decompress_1D_plain_f32_blk64(d_decData, d_cmpBytes, nbEle, cmpSize, absErr, stream);
-        cudaEventRecord(stop, stream);
-        cudaEventSynchronize(stop);
-        cudaEventElapsedTime(&elapsed, start, stop);
-        decomp_times[r] = elapsed;
-    }
-
-    /* Quality check */
-    cudaMemcpy(decData, d_decData, rawBytes, cudaMemcpyDeviceToHost);
-    {
+        /* Quality check */
+        cudaMemcpy(decData, d_decData, rawBytes, cudaMemcpyDeviceToHost);
         quality_t q = check_quality(oriData, decData, nbEle);
 
-        /* Compute stats: throughput = MiB / ms (matching cuSZp convention) */
+        /* Compute stats */
         pstats cs = compute_pstats(comp_times, repeat);
         pstats ds = compute_pstats(decomp_times, repeat);
 
         double cr = (double)rawBytes / (double)cmpSize;
         double comp_gbs = rawMiB / cs.median;
         double comp_p95_gbs = rawMiB / cs.p95;
-        double comp_min_gbs = rawMiB / cs.max;  /* worst time = min throughput */
+        double comp_min_gbs = rawMiB / cs.max;
         double dec_gbs = rawMiB / ds.median;
         double dec_p95_gbs = rawMiB / ds.p95;
         double dec_min_gbs = rawMiB / ds.max;
 
-        /* Error bound check */
-        if (q.max_abs_err <= absErr * 1.01)
-            printf("\033[0;32mPass error check!\033[0m\n");
-        else
-            printf("\033[0;31mFail error check! maxAbsErr=%.6e > bound=%.6e\033[0m\n",
-                   q.max_abs_err, (double)absErr);
+        const char *check_str = (q.max_abs_err <= absErr * 1.01) ? "PASS" : "FAIL";
 
-        /* Human-readable table */
-        printf("\n%-8s  %10s  %12s  %12s  %12s  %12s  %12s  %12s\n",
-               "BlkSize", "CR", "Comp(GB/s)", "Comp_P95", "Decomp(GB/s)", "Dec_P95", "MaxAbsErr", "PSNR(dB)");
-        printf("--------  ----------  ------------  ------------  ------------  ------------  ------------  ------------\n");
-        printf("%-8d  %10.2f  %12.2f  %12.2f  %12.2f  %12.2f  %12.2e  %12.1f\n",
-               64, cr, comp_gbs, comp_p95_gbs, dec_gbs, dec_p95_gbs,
-               q.max_abs_err, q.psnr);
+        /* Human-readable row */
+        printf("%-8d  %10.2f  %12.2f  %12.2f  %12.2f  %12.2f  %12.2e  %12.1f  %s\n",
+               bs, cr, comp_gbs, comp_p95_gbs, dec_gbs, dec_p95_gbs,
+               q.max_abs_err, q.psnr, check_str);
 
-        /* CSV block */
-        printf("\n# CSV_START\n");
-        printf("dataset,elements,valueRange,errMode,userBound,absErr,warmup,repeat,"
-               "blockSize,CR,cmpBytes,"
-               "comp_median_GBs,comp_p95_GBs,comp_min_GBs,"
-               "decomp_median_GBs,decomp_p95_GBs,decomp_min_GBs,"
-               "maxAbsErr,maxRelErr,PSNR\n");
+        /* CSV row */
         printf("%s,%zu,%.6e,%s,%e,%e,%d,%d,"
                "%d,%.4f,%zu,"
                "%.4f,%.4f,%.4f,"
@@ -268,14 +270,14 @@ int main(int argc, char **argv)
                "%.6e,%.6e,%.1f\n",
                oriFilePath, nbEle, (double)valueRange,
                errorBoundMode, (double)userBound, (double)absErr, warmup, repeat,
-               64, cr, cmpSize,
+               bs, cr, cmpSize,
                comp_gbs, comp_p95_gbs, comp_min_gbs,
                dec_gbs, dec_p95_gbs, dec_min_gbs,
                q.max_abs_err, q.max_rel_err, q.psnr);
-        printf("# CSV_END\n");
     }
 
-cleanup:
+    printf("# CSV_END\n");
+
     free(oriData);
     free(decData);
     free(cmpBytes_dup);

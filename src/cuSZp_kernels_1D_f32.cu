@@ -2275,18 +2275,20 @@ __global__ void cuSZp_decompress_kernel_1D_outlier_f32(float* const __restrict__
 
 
 // ====================================================================
-//  Block-size=64 variants (2 warps per block, per-warp lookback)
+//  Template kernels for arbitrary block sizes (32, 64, 128, 256)
 // ====================================================================
 
-__global__ void cuSZp_compress_kernel_1D_plain_f32_blk64(const float* const __restrict__ oriData,
+template <int BLOCK_SIZE>
+__global__ void cuSZp_compress_kernel_1D_plain_f32_blkN(const float* const __restrict__ oriData,
                                                 unsigned char* const __restrict__ cmpData,
                                                 volatile unsigned int* const __restrict__ cmpOffset,
                                                 volatile unsigned int* const __restrict__ locOffset,
                                                 volatile int* const __restrict__ flag,
                                                 const float eb, const size_t nbEle)
 {
-    __shared__ unsigned int excl_sum[2];
-    __shared__ unsigned int base_idx[2];
+    constexpr int NUM_WARPS = BLOCK_SIZE / 32;
+    __shared__ unsigned int excl_sum[NUM_WARPS];
+    __shared__ unsigned int base_idx[NUM_WARPS];
 
     const int tid = threadIdx.x;
     const int bid = blockIdx.x;
@@ -2295,7 +2297,7 @@ __global__ void cuSZp_compress_kernel_1D_plain_f32_blk64(const float* const __re
     const int warp = idx >> 5;
     const int warp_in_block = tid >> 5;
     const int block_num = thread_chunk >> 5;
-    const int rate_ofs = (nbEle+tblock_size_64*thread_chunk-1)/(tblock_size_64*thread_chunk)*(tblock_size_64*thread_chunk)/32;
+    const int rate_ofs = (nbEle+(size_t)BLOCK_SIZE*thread_chunk-1)/((size_t)BLOCK_SIZE*thread_chunk)*((size_t)BLOCK_SIZE*thread_chunk)/32;
     const float recipPrecision = 0.5f/eb;
 
     if (!lane) {
@@ -2464,7 +2466,7 @@ __global__ void cuSZp_compress_kernel_1D_plain_f32_blk64(const float* const __re
         {
             cmpOffset[warp] = excl_sum[warp_in_block];
             __threadfence();
-            if(warp==gridDim.x*2-1) cmpOffset[warp+1] = cmpOffset[warp] + locOffset[warp+1];
+            if(warp==gridDim.x*NUM_WARPS-1) cmpOffset[warp+1] = cmpOffset[warp] + locOffset[warp+1];
             __threadfence();
             flag[warp] = 2;
             __threadfence();
@@ -2558,15 +2560,17 @@ __global__ void cuSZp_compress_kernel_1D_plain_f32_blk64(const float* const __re
 }
 
 
-__global__ void cuSZp_decompress_kernel_1D_plain_f32_blk64(float* const __restrict__ decData,
+template <int BLOCK_SIZE>
+__global__ void cuSZp_decompress_kernel_1D_plain_f32_blkN(float* const __restrict__ decData,
                                                   const unsigned char* const __restrict__ cmpData,
                                                   volatile unsigned int* const __restrict__ cmpOffset,
                                                   volatile unsigned int* const __restrict__ locOffset,
                                                   volatile int* const __restrict__ flag,
                                                   const float eb, const size_t nbEle)
 {
-    __shared__ unsigned int excl_sum[2];
-    __shared__ unsigned int base_idx[2];
+    constexpr int NUM_WARPS = BLOCK_SIZE / 32;
+    __shared__ unsigned int excl_sum[NUM_WARPS];
+    __shared__ unsigned int base_idx[NUM_WARPS];
 
     const int tid = threadIdx.x;
     const int bid = blockIdx.x;
@@ -2575,7 +2579,7 @@ __global__ void cuSZp_decompress_kernel_1D_plain_f32_blk64(float* const __restri
     const int warp = idx >> 5;
     const int warp_in_block = tid >> 5;
     const int block_num = thread_chunk >> 5;
-    const int rate_ofs = (nbEle+tblock_size_64*thread_chunk-1)/(tblock_size_64*thread_chunk)*(tblock_size_64*thread_chunk)/32;
+    const int rate_ofs = (nbEle+(size_t)BLOCK_SIZE*thread_chunk-1)/((size_t)BLOCK_SIZE*thread_chunk)*((size_t)BLOCK_SIZE*thread_chunk)/32;
 
     if (!lane) {
         excl_sum[warp_in_block] = 0;
@@ -2792,3 +2796,12 @@ __global__ void cuSZp_decompress_kernel_1D_plain_f32_blk64(float* const __restri
         cur_byte_ofs += __shfl_sync(0xffffffff, tmp_byte_ofs, 31);
     }
 }
+// Explicit instantiations for supported block sizes.
+template __global__ void cuSZp_compress_kernel_1D_plain_f32_blkN<32>(const float* const __restrict__, unsigned char* const __restrict__, volatile unsigned int* const __restrict__, volatile unsigned int* const __restrict__, volatile int* const __restrict__, const float, const size_t);
+template __global__ void cuSZp_compress_kernel_1D_plain_f32_blkN<64>(const float* const __restrict__, unsigned char* const __restrict__, volatile unsigned int* const __restrict__, volatile unsigned int* const __restrict__, volatile int* const __restrict__, const float, const size_t);
+template __global__ void cuSZp_compress_kernel_1D_plain_f32_blkN<128>(const float* const __restrict__, unsigned char* const __restrict__, volatile unsigned int* const __restrict__, volatile unsigned int* const __restrict__, volatile int* const __restrict__, const float, const size_t);
+template __global__ void cuSZp_compress_kernel_1D_plain_f32_blkN<256>(const float* const __restrict__, unsigned char* const __restrict__, volatile unsigned int* const __restrict__, volatile unsigned int* const __restrict__, volatile int* const __restrict__, const float, const size_t);
+template __global__ void cuSZp_decompress_kernel_1D_plain_f32_blkN<32>(float* const __restrict__, const unsigned char* const __restrict__, volatile unsigned int* const __restrict__, volatile unsigned int* const __restrict__, volatile int* const __restrict__, const float, const size_t);
+template __global__ void cuSZp_decompress_kernel_1D_plain_f32_blkN<64>(float* const __restrict__, const unsigned char* const __restrict__, volatile unsigned int* const __restrict__, volatile unsigned int* const __restrict__, volatile int* const __restrict__, const float, const size_t);
+template __global__ void cuSZp_decompress_kernel_1D_plain_f32_blkN<128>(float* const __restrict__, const unsigned char* const __restrict__, volatile unsigned int* const __restrict__, volatile unsigned int* const __restrict__, volatile int* const __restrict__, const float, const size_t);
+template __global__ void cuSZp_decompress_kernel_1D_plain_f32_blkN<256>(float* const __restrict__, const unsigned char* const __restrict__, volatile unsigned int* const __restrict__, volatile unsigned int* const __restrict__, volatile int* const __restrict__, const float, const size_t);

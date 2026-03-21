@@ -380,21 +380,26 @@ void cuSZp_decompress_1D_outlier_f32(float* d_decData, unsigned char* d_cmpBytes
 
 
 // ====================================================================
-//  Block-size=64 variants (2 warps per block, per-warp lookback)
+//  Generic block-size variants (template dispatch)
 // ====================================================================
 
-void cuSZp_compress_1D_plain_f32_blk64(float* d_oriData, unsigned char* d_cmpBytes, size_t nbEle, size_t* cmpSize, float errorBound, cudaStream_t stream)
+// Helper macro to launch the correct template instantiation.
+#define LAUNCH_COMPRESS_BLKN(BS) \
+    cuSZp_compress_kernel_1D_plain_f32_blkN<BS><<<gsize, bsize, 0, stream>>>(d_oriData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle)
+#define LAUNCH_DECOMPRESS_BLKN(BS) \
+    cuSZp_decompress_kernel_1D_plain_f32_blkN<BS><<<gsize, bsize, 0, stream>>>(d_decData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle)
+
+void cuSZp_compress_1D_plain_f32_blkN(float* d_oriData, unsigned char* d_cmpBytes, size_t nbEle, size_t* cmpSize, float errorBound, int blockSize, cudaStream_t stream)
 {
-    // Data blocking: 2 warps per block, lookback arrays sized per-warp.
-    int bsize = 64;
+    int bsize = blockSize;
+    int num_warps_per_block = bsize / 32;
     int total_warps = (nbEle + 32 * thread_chunk - 1) / (32 * thread_chunk);
-    int gsize = (total_warps + 1) / 2;
+    int gsize = (total_warps + num_warps_per_block - 1) / num_warps_per_block;
     int cmpOffSize = total_warps + 1;
     const size_t rate_ofs =
         (nbEle + (size_t)bsize * thread_chunk - 1) / ((size_t)bsize * thread_chunk) *
         ((size_t)bsize * thread_chunk) / 32;
 
-    // Initializing global memory for GPU compression.
     unsigned int* d_cmpOffset = NULL;
     unsigned int* d_locOffset = NULL;
     int* d_flag = NULL;
@@ -402,64 +407,80 @@ void cuSZp_compress_1D_plain_f32_blk64(float* d_oriData, unsigned char* d_cmpByt
     cudaError_t err = cudaSuccess;
 
     err = cudaMalloc((void**)&d_cmpOffset, sizeof(unsigned int)*cmpOffSize);
-    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_compress_1D_plain_f32_blk64: cudaMalloc(d_cmpOffset) failed: %s\n", cudaGetErrorString(err)); if (cmpSize) *cmpSize = 0; return; }
+    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_compress_1D_plain_f32_blkN: cudaMalloc failed: %s\n", cudaGetErrorString(err)); if (cmpSize) *cmpSize = 0; return; }
     cudaMemsetAsync(d_cmpOffset, 0, sizeof(unsigned int)*cmpOffSize, stream);
     err = cudaMalloc((void**)&d_locOffset, sizeof(unsigned int)*cmpOffSize);
-    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_compress_1D_plain_f32_blk64: cudaMalloc(d_locOffset) failed: %s\n", cudaGetErrorString(err)); if (cmpSize) *cmpSize = 0; goto cleanup_blk64_cmp; }
+    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_compress_1D_plain_f32_blkN: cudaMalloc failed: %s\n", cudaGetErrorString(err)); if (cmpSize) *cmpSize = 0; goto cleanup_blkN_cmp; }
     cudaMemsetAsync(d_locOffset, 0, sizeof(unsigned int)*cmpOffSize, stream);
     err = cudaMalloc((void**)&d_flag, sizeof(int)*cmpOffSize);
-    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_compress_1D_plain_f32_blk64: cudaMalloc(d_flag) failed: %s\n", cudaGetErrorString(err)); if (cmpSize) *cmpSize = 0; goto cleanup_blk64_cmp; }
+    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_compress_1D_plain_f32_blkN: cudaMalloc failed: %s\n", cudaGetErrorString(err)); if (cmpSize) *cmpSize = 0; goto cleanup_blkN_cmp; }
     cudaMemsetAsync(d_flag, 0, sizeof(int)*cmpOffSize, stream);
 
-    // cuSZp GPU compression with block size 64.
-    cuSZp_compress_kernel_1D_plain_f32_blk64<<<gsize, bsize, 0, stream>>>(d_oriData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
+    switch (blockSize) {
+        case 32:  LAUNCH_COMPRESS_BLKN(32);  break;
+        case 64:  LAUNCH_COMPRESS_BLKN(64);  break;
+        case 128: LAUNCH_COMPRESS_BLKN(128); break;
+        case 256: LAUNCH_COMPRESS_BLKN(256); break;
+        default:
+            fprintf(stderr, "cuSZp_compress_1D_plain_f32_blkN: unsupported blockSize=%d\n", blockSize);
+            if (cmpSize) *cmpSize = 0;
+            goto cleanup_blkN_cmp;
+    }
     err = cudaGetLastError();
-    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_compress_1D_plain_f32_blk64: kernel launch failed: %s\n", cudaGetErrorString(err)); if (cmpSize) *cmpSize = 0; goto cleanup_blk64_cmp; }
+    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_compress_1D_plain_f32_blkN: kernel launch failed: %s\n", cudaGetErrorString(err)); if (cmpSize) *cmpSize = 0; goto cleanup_blkN_cmp; }
 
-    // Obtain compressed size.
     err = cudaMemcpyAsync(&glob_sync, d_cmpOffset+total_warps, sizeof(unsigned int), cudaMemcpyDeviceToHost, stream);
-    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_compress_1D_plain_f32_blk64: cudaMemcpyAsync failed: %s\n", cudaGetErrorString(err)); if (cmpSize) *cmpSize = 0; goto cleanup_blk64_cmp; }
+    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_compress_1D_plain_f32_blkN: cudaMemcpyAsync failed: %s\n", cudaGetErrorString(err)); if (cmpSize) *cmpSize = 0; goto cleanup_blkN_cmp; }
     err = cudaStreamSynchronize(stream);
-    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_compress_1D_plain_f32_blk64: cudaStreamSynchronize failed: %s\n", cudaGetErrorString(err)); if (cmpSize) *cmpSize = 0; goto cleanup_blk64_cmp; }
+    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_compress_1D_plain_f32_blkN: cudaStreamSynchronize failed: %s\n", cudaGetErrorString(err)); if (cmpSize) *cmpSize = 0; goto cleanup_blkN_cmp; }
     if (cmpSize) *cmpSize = (size_t)glob_sync + rate_ofs;
 
-cleanup_blk64_cmp:
+cleanup_blkN_cmp:
     cudaFree(d_cmpOffset);
     cudaFree(d_locOffset);
     cudaFree(d_flag);
 }
 
-void cuSZp_decompress_1D_plain_f32_blk64(float* d_decData, unsigned char* d_cmpBytes, size_t nbEle, size_t cmpSize, float errorBound, cudaStream_t stream)
+void cuSZp_decompress_1D_plain_f32_blkN(float* d_decData, unsigned char* d_cmpBytes, size_t nbEle, size_t cmpSize, float errorBound, int blockSize, cudaStream_t stream)
 {
-    // Data blocking: 2 warps per block, lookback arrays sized per-warp.
-    int bsize = 64;
+    int bsize = blockSize;
+    int num_warps_per_block = bsize / 32;
     int total_warps = (nbEle + 32 * thread_chunk - 1) / (32 * thread_chunk);
-    int gsize = (total_warps + 1) / 2;
+    int gsize = (total_warps + num_warps_per_block - 1) / num_warps_per_block;
     int cmpOffSize = total_warps + 1;
 
-    // Initializing global memory for GPU decompression.
     unsigned int* d_cmpOffset = NULL;
     unsigned int* d_locOffset = NULL;
     int* d_flag = NULL;
     cudaError_t err = cudaSuccess;
 
     err = cudaMalloc((void**)&d_cmpOffset, sizeof(unsigned int)*cmpOffSize);
-    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_decompress_1D_plain_f32_blk64: cudaMalloc(d_cmpOffset) failed: %s\n", cudaGetErrorString(err)); return; }
+    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_decompress_1D_plain_f32_blkN: cudaMalloc failed: %s\n", cudaGetErrorString(err)); return; }
     cudaMemsetAsync(d_cmpOffset, 0, sizeof(unsigned int)*cmpOffSize, stream);
     err = cudaMalloc((void**)&d_locOffset, sizeof(unsigned int)*cmpOffSize);
-    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_decompress_1D_plain_f32_blk64: cudaMalloc(d_locOffset) failed: %s\n", cudaGetErrorString(err)); goto cleanup_blk64_dec; }
+    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_decompress_1D_plain_f32_blkN: cudaMalloc failed: %s\n", cudaGetErrorString(err)); goto cleanup_blkN_dec; }
     cudaMemsetAsync(d_locOffset, 0, sizeof(unsigned int)*cmpOffSize, stream);
     err = cudaMalloc((void**)&d_flag, sizeof(int)*cmpOffSize);
-    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_decompress_1D_plain_f32_blk64: cudaMalloc(d_flag) failed: %s\n", cudaGetErrorString(err)); goto cleanup_blk64_dec; }
+    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_decompress_1D_plain_f32_blkN: cudaMalloc failed: %s\n", cudaGetErrorString(err)); goto cleanup_blkN_dec; }
     cudaMemsetAsync(d_flag, 0, sizeof(int)*cmpOffSize, stream);
 
-    // cuSZp GPU decompression with block size 64.
-    cuSZp_decompress_kernel_1D_plain_f32_blk64<<<gsize, bsize, 0, stream>>>(d_decData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
+    switch (blockSize) {
+        case 32:  LAUNCH_DECOMPRESS_BLKN(32);  break;
+        case 64:  LAUNCH_DECOMPRESS_BLKN(64);  break;
+        case 128: LAUNCH_DECOMPRESS_BLKN(128); break;
+        case 256: LAUNCH_DECOMPRESS_BLKN(256); break;
+        default:
+            fprintf(stderr, "cuSZp_decompress_1D_plain_f32_blkN: unsupported blockSize=%d\n", blockSize);
+            goto cleanup_blkN_dec;
+    }
     err = cudaGetLastError();
-    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_decompress_1D_plain_f32_blk64: kernel launch failed: %s\n", cudaGetErrorString(err)); goto cleanup_blk64_dec; }
+    if (err != cudaSuccess) { fprintf(stderr, "cuSZp_decompress_1D_plain_f32_blkN: kernel launch failed: %s\n", cudaGetErrorString(err)); goto cleanup_blkN_dec; }
 
-cleanup_blk64_dec:
+cleanup_blkN_dec:
     cudaFree(d_cmpOffset);
     cudaFree(d_locOffset);
     cudaFree(d_flag);
 }
+
+#undef LAUNCH_COMPRESS_BLKN
+#undef LAUNCH_DECOMPRESS_BLKN
