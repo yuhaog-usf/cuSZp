@@ -2272,3 +2272,502 @@ __global__ void cuSZp_decompress_kernel_1D_outlier_f32(float* const __restrict__
 // {
 //     return (sizeof(unsigned int)*8) - __clz(x);
 // }
+
+// ============================================================================
+// Template kernels for variable datablock sizes (DBLOCK = 32, 64, 128, 256).
+// CUDA block is always 32 threads (1 warp). Only the compression block size
+// (number of data elements grouped for quantization + bit-packing) changes.
+// ============================================================================
+
+template <int DBLOCK>
+__global__ void cuSZp_compress_kernel_1D_plain_f32_dblk(const float* const __restrict__ oriData, 
+                                                unsigned char* const __restrict__ cmpData, 
+                                                volatile unsigned int* const __restrict__ cmpOffset, 
+                                                volatile unsigned int* const __restrict__ locOffset, 
+                                                volatile int* const __restrict__ flag, 
+                                                const float eb, const size_t nbEle)
+{
+    __shared__ unsigned int excl_sum;
+    __shared__ unsigned int base_idx;
+
+    constexpr int SIGN_WORDS = DBLOCK / 32;
+    constexpr int SIGN_BYTES = DBLOCK / 8;
+    constexpr int block_num = thread_chunk / DBLOCK;
+
+    const int tid = threadIdx.x;
+    const int bid = blockIdx.x;
+    const int idx = bid * blockDim.x + tid;
+    const int lane = idx & 0x1f;
+    const int warp = idx >> 5;
+    const int rate_ofs = (nbEle+(size_t)tblock_size*thread_chunk-1)/((size_t)tblock_size*thread_chunk)*((size_t)tblock_size*thread_chunk)/DBLOCK;
+    const float recipPrecision = 0.5f/eb;
+
+    if (!tid) {
+        excl_sum = 0;
+        base_idx = 0;
+    }
+    __syncthreads();
+
+    int base_start_idx;
+    int base_block_start_idx, base_block_end_idx;
+    int quant_chunk_idx;
+    int block_idx;
+    int currQuant, lorenQuant, prevQuant, maxQuant;
+    int absQuant[thread_chunk];
+    unsigned int sign_flag[block_num * SIGN_WORDS];
+    int sign_ofs;
+    int fixed_rate[block_num];
+    unsigned int thread_ofs = 0;
+    float4 tmp_buffer;
+    uchar4 tmp_char;
+
+    base_start_idx = warp * thread_chunk * 32;
+    for(int j=0; j<block_num; j++)
+    {
+        base_block_start_idx = base_start_idx + j * (32 * DBLOCK) + lane * DBLOCK;
+        base_block_end_idx = base_block_start_idx + DBLOCK;
+        for(int sw=0; sw<SIGN_WORDS; sw++) sign_flag[j*SIGN_WORDS+sw] = 0;
+        block_idx = base_block_start_idx/DBLOCK;
+        prevQuant = 0;
+        maxQuant = 0;
+
+        if(base_block_end_idx < nbEle)
+        {
+            for(int i=base_block_start_idx; i<base_block_end_idx; i+=4)
+            {
+                tmp_buffer = reinterpret_cast<const float4*>(oriData)[i/4];
+                quant_chunk_idx = j * DBLOCK + (i - base_block_start_idx);
+
+                int local_i = i - base_block_start_idx;
+
+                currQuant = quantization(tmp_buffer.x, recipPrecision);
+                lorenQuant = currQuant - prevQuant;
+                prevQuant = currQuant;
+                sign_flag[j*SIGN_WORDS + local_i/32] |= (lorenQuant < 0) << (31 - (local_i % 32));
+                absQuant[quant_chunk_idx] = abs(lorenQuant);
+                maxQuant = maxQuant > absQuant[quant_chunk_idx] ? maxQuant : absQuant[quant_chunk_idx];
+
+                currQuant = quantization(tmp_buffer.y, recipPrecision);
+                lorenQuant = currQuant - prevQuant;
+                prevQuant = currQuant;
+                sign_flag[j*SIGN_WORDS + (local_i+1)/32] |= (lorenQuant < 0) << (31 - ((local_i+1) % 32));
+                absQuant[quant_chunk_idx+1] = abs(lorenQuant);
+                maxQuant = maxQuant > absQuant[quant_chunk_idx+1] ? maxQuant : absQuant[quant_chunk_idx+1];
+
+                currQuant = quantization(tmp_buffer.z, recipPrecision);
+                lorenQuant = currQuant - prevQuant;
+                prevQuant = currQuant;
+                sign_flag[j*SIGN_WORDS + (local_i+2)/32] |= (lorenQuant < 0) << (31 - ((local_i+2) % 32));
+                absQuant[quant_chunk_idx+2] = abs(lorenQuant);
+                maxQuant = maxQuant > absQuant[quant_chunk_idx+2] ? maxQuant : absQuant[quant_chunk_idx+2];
+
+                currQuant = quantization(tmp_buffer.w, recipPrecision);
+                lorenQuant = currQuant - prevQuant;
+                prevQuant = currQuant;
+                sign_flag[j*SIGN_WORDS + (local_i+3)/32] |= (lorenQuant < 0) << (31 - ((local_i+3) % 32));
+                absQuant[quant_chunk_idx+3] = abs(lorenQuant);
+                maxQuant = maxQuant > absQuant[quant_chunk_idx+3] ? maxQuant : absQuant[quant_chunk_idx+3];
+            }
+        }
+        else
+        {
+            if(base_block_start_idx >= nbEle)
+            {
+                quant_chunk_idx = j * DBLOCK;
+                for(int i=0; i<DBLOCK; i++) absQuant[quant_chunk_idx+i] = 0;
+            }
+            else
+            {
+                int remainbEle = nbEle - base_block_start_idx;
+
+                for(int i=0; i<remainbEle; i++)
+                {
+                    quant_chunk_idx = j * DBLOCK + i;
+                    currQuant = quantization(oriData[base_block_start_idx+i], recipPrecision);
+                    lorenQuant = currQuant - prevQuant;
+                    prevQuant = currQuant;
+                    sign_flag[j*SIGN_WORDS + i/32] |= (lorenQuant < 0) << (31 - (i % 32));
+                    absQuant[quant_chunk_idx] = abs(lorenQuant);
+                    maxQuant = maxQuant > absQuant[quant_chunk_idx] ? maxQuant : absQuant[quant_chunk_idx];
+                }
+
+                quant_chunk_idx = j * DBLOCK + remainbEle;
+                for(int i=remainbEle; i<DBLOCK; i++) absQuant[j*DBLOCK+i] = 0;
+            }  
+        }
+
+        fixed_rate[j] = get_bit_num(maxQuant);
+        thread_ofs += (fixed_rate[j]) ? (SIGN_BYTES+fixed_rate[j]*SIGN_BYTES) : 0;
+        cmpData[block_idx] = (unsigned char)fixed_rate[j];
+        __syncthreads();
+    }
+
+    // Warp-level prefix sum (unchanged)
+    #pragma unroll 5
+    for(int i=1; i<32; i<<=1)
+    {
+        int tmp = __shfl_up_sync(0xffffffff, thread_ofs, i);
+        if(lane >= i) thread_ofs += tmp;
+    }
+    __syncthreads();
+
+    if(lane==31) 
+    {
+        locOffset[warp+1] = thread_ofs;
+        __threadfence();
+        if(warp==0)
+        {
+            flag[0] = 2;
+            __threadfence();
+            flag[1] = 1;
+            __threadfence();
+        }
+        else
+        {
+            flag[warp+1] = 1;
+            __threadfence();    
+        }
+    }
+    __syncthreads();
+
+    // Decoupled lookback (unchanged)
+    if(warp>0)
+    {
+        if(!lane)
+        {
+            int lookback = warp;
+            int loc_excl_sum = 0;
+            while(lookback>0)
+            {
+                int status;
+                do{
+                    status = flag[lookback];
+                    __threadfence();
+                } while (status==0);
+                if(status==2)
+                {
+                    loc_excl_sum += cmpOffset[lookback];
+                    __threadfence();
+                    break;
+                }
+                if(status==1) loc_excl_sum += locOffset[lookback];
+                lookback--;
+                __threadfence();
+            }
+            excl_sum = loc_excl_sum;
+        }
+        __syncthreads();
+    }
+    
+    if(warp>0)
+    {
+        if(!lane)
+        {
+            cmpOffset[warp] = excl_sum;
+            __threadfence();
+            if(warp==gridDim.x-1) cmpOffset[warp+1] = cmpOffset[warp] + locOffset[warp+1];
+            __threadfence();
+            flag[warp] = 2;
+            __threadfence(); 
+        }
+    }
+    __syncthreads();
+    
+    if(!lane) base_idx = excl_sum + rate_ofs;
+    __syncthreads();
+
+    // Bit-packing phase
+    unsigned int base_cmp_byte_ofs = base_idx;
+    unsigned int cmp_byte_ofs;
+    unsigned int tmp_byte_ofs = 0;
+    unsigned int cur_byte_ofs = 0;
+    for(int j=0; j<block_num; j++)
+    {
+        int chunk_idx_start = j*DBLOCK;
+
+        tmp_byte_ofs = (fixed_rate[j]) ? (SIGN_BYTES+fixed_rate[j]*SIGN_BYTES) : 0;
+        #pragma unroll 5
+        for(int i=1; i<32; i<<=1)
+        {
+            int tmp = __shfl_up_sync(0xffffffff, tmp_byte_ofs, i);
+            if(lane >= i) tmp_byte_ofs += tmp;
+        }
+        unsigned int prev_thread = __shfl_up_sync(0xffffffff, tmp_byte_ofs, 1);
+        if(!lane) cmp_byte_ofs = base_cmp_byte_ofs + cur_byte_ofs;
+        else cmp_byte_ofs = base_cmp_byte_ofs + cur_byte_ofs + prev_thread;
+
+        if(fixed_rate[j])
+        {
+            // Write sign flags: SIGN_WORDS uint32s = SIGN_BYTES bytes
+            for(int sw=0; sw<SIGN_WORDS; sw++)
+            {
+                unsigned int sf = sign_flag[j*SIGN_WORDS+sw];
+                tmp_char.x = 0xff & (sf >> 24);
+                tmp_char.y = 0xff & (sf >> 16);
+                tmp_char.z = 0xff & (sf >> 8);
+                tmp_char.w = 0xff & sf;
+                reinterpret_cast<uchar4*>(cmpData)[cmp_byte_ofs/4] = tmp_char;
+                cmp_byte_ofs+=4;
+            }
+
+            // Write bit planes: each plane is SIGN_BYTES bytes
+            int mask = 1;
+            for(int i=0; i<fixed_rate[j]; i++)
+            {
+                for(int g=0; g<DBLOCK; g+=8)
+                {
+                    unsigned char byte_val = 
+                        (((absQuant[chunk_idx_start+g+0] & mask) >> i) << 7) |
+                        (((absQuant[chunk_idx_start+g+1] & mask) >> i) << 6) |
+                        (((absQuant[chunk_idx_start+g+2] & mask) >> i) << 5) |
+                        (((absQuant[chunk_idx_start+g+3] & mask) >> i) << 4) |
+                        (((absQuant[chunk_idx_start+g+4] & mask) >> i) << 3) |
+                        (((absQuant[chunk_idx_start+g+5] & mask) >> i) << 2) |
+                        (((absQuant[chunk_idx_start+g+6] & mask) >> i) << 1) |
+                        (((absQuant[chunk_idx_start+g+7] & mask) >> i) << 0);
+                    cmpData[cmp_byte_ofs] = byte_val;
+                    cmp_byte_ofs++;
+                }
+                mask <<= 1;
+            }
+        }
+
+        cur_byte_ofs += __shfl_sync(0xffffffff, tmp_byte_ofs, 31);
+    }
+}
+
+
+template <int DBLOCK>
+__global__ void cuSZp_decompress_kernel_1D_plain_f32_dblk(float* const __restrict__ decData, 
+                                                  const unsigned char* const __restrict__ cmpData, 
+                                                  volatile unsigned int* const __restrict__ cmpOffset, 
+                                                  volatile unsigned int* const __restrict__ locOffset, 
+                                                  volatile int* const __restrict__ flag, 
+                                                  const float eb, const size_t nbEle)
+{
+    __shared__ unsigned int excl_sum;
+    __shared__ unsigned int base_idx;
+
+    constexpr int SIGN_WORDS = DBLOCK / 32;
+    constexpr int SIGN_BYTES = DBLOCK / 8;
+    constexpr int block_num = thread_chunk / DBLOCK;
+
+    const int tid = threadIdx.x;
+    const int bid = blockIdx.x;
+    const int idx = bid * blockDim.x + tid;
+    const int lane = idx & 0x1f;
+    const int warp = idx >> 5;
+    const int rate_ofs = (nbEle+(size_t)tblock_size*thread_chunk-1)/((size_t)tblock_size*thread_chunk)*((size_t)tblock_size*thread_chunk)/DBLOCK;
+
+    if (!tid) {
+        excl_sum = 0;
+        base_idx = 0;
+    }
+    __syncthreads();
+
+    int base_start_idx;
+    int base_block_start_idx, base_block_end_idx;
+    int block_idx;    
+    int absQuant[DBLOCK];
+    int currQuant, lorenQuant, prevQuant;
+    int sign_ofs;
+    int fixed_rate[block_num];
+    unsigned int thread_ofs = 0;
+    uchar4 tmp_char;
+    float4 dec_buffer;
+
+    // Read rates
+    for(int j=0; j<block_num; j++)
+    {
+        block_idx = warp * (32 * block_num) + j * 32 + lane;
+        fixed_rate[j] = (int)cmpData[block_idx];
+        thread_ofs += (fixed_rate[j]) ? (SIGN_BYTES+fixed_rate[j]*SIGN_BYTES) : 0;
+        __syncthreads();
+    }
+
+    // Warp-level prefix sum (unchanged)
+    #pragma unroll 5
+    for(int i=1; i<32; i<<=1)
+    {
+        int tmp = __shfl_up_sync(0xffffffff, thread_ofs, i);
+        if(lane >= i) thread_ofs += tmp;
+    }
+    __syncthreads();
+
+    if(lane==31) 
+    {
+        locOffset[warp+1] = thread_ofs;
+        __threadfence();
+        if(warp==0)
+        {
+            flag[0] = 2;
+            __threadfence();
+            flag[1] = 1;
+            __threadfence();
+        }
+        else
+        {
+            flag[warp+1] = 1;
+            __threadfence();    
+        }
+    }
+    __syncthreads();
+
+    // Decoupled lookback (unchanged)
+    if(warp>0)
+    {
+        if(!lane)
+        {
+            int lookback = warp;
+            int loc_excl_sum = 0;
+            while(lookback>0)
+            {
+                int status;
+                do{
+                    status = flag[lookback];
+                    __threadfence();
+                } while (status==0);
+                if(status==2)
+                {
+                    loc_excl_sum += cmpOffset[lookback];
+                    __threadfence();
+                    break;
+                }
+                if(status==1) loc_excl_sum += locOffset[lookback];
+                lookback--;
+                __threadfence();
+            }
+            excl_sum = loc_excl_sum;
+        }
+        __syncthreads();
+    }
+    
+    if(warp>0)
+    {
+        if(!lane) cmpOffset[warp] = excl_sum;
+        __threadfence();
+        if(!lane) flag[warp] = 2;
+        __threadfence();  
+    }
+    __syncthreads();
+
+    if(!lane) base_idx = excl_sum + rate_ofs;
+    __syncthreads();
+
+    // Bit-unpacking + reconstruction
+    unsigned int base_cmp_byte_ofs = base_idx;
+    unsigned int cmp_byte_ofs;
+    unsigned int tmp_byte_ofs = 0;
+    unsigned int cur_byte_ofs = 0;
+    base_start_idx = warp * thread_chunk * 32;
+    for(int j=0; j<block_num; j++)
+    {
+        base_block_start_idx = base_start_idx + j * (32 * DBLOCK) + lane * DBLOCK;
+        base_block_end_idx = base_block_start_idx + DBLOCK;
+        unsigned int sign_flags[SIGN_WORDS];
+        for(int sw=0; sw<SIGN_WORDS; sw++) sign_flags[sw] = 0;
+
+        tmp_byte_ofs = (fixed_rate[j]) ? (SIGN_BYTES+fixed_rate[j]*SIGN_BYTES) : 0;
+        #pragma unroll 5
+        for(int i=1; i<32; i<<=1)
+        {
+            int tmp = __shfl_up_sync(0xffffffff, tmp_byte_ofs, i);
+            if(lane >= i) tmp_byte_ofs += tmp;
+        }
+        unsigned int prev_thread = __shfl_up_sync(0xffffffff, tmp_byte_ofs, 1);
+        if(!lane) cmp_byte_ofs = base_cmp_byte_ofs + cur_byte_ofs;
+        else cmp_byte_ofs = base_cmp_byte_ofs + cur_byte_ofs + prev_thread;
+
+        if(fixed_rate[j])
+        {
+            // Read sign flags: SIGN_WORDS uint32s
+            for(int sw=0; sw<SIGN_WORDS; sw++)
+            {
+                tmp_char = reinterpret_cast<const uchar4*>(cmpData)[cmp_byte_ofs/4];
+                sign_flags[sw] = (0xff000000 & (tmp_char.x << 24)) |
+                                 (0x00ff0000 & (tmp_char.y << 16)) |
+                                 (0x0000ff00 & (tmp_char.z << 8))  |
+                                 (0x000000ff & tmp_char.w);
+                cmp_byte_ofs+=4;
+            }
+            
+            // Read bit planes and reconstruct absQuant
+            for(int i=0; i<DBLOCK; i++) absQuant[i] = 0;
+            for(int i=0; i<fixed_rate[j]; i++)
+            {
+                for(int g=0; g<DBLOCK; g+=8)
+                {
+                    unsigned char byte_val = cmpData[cmp_byte_ofs];
+                    cmp_byte_ofs++;
+                    absQuant[g+0] |= ((byte_val >> 7) & 0x01) << i;
+                    absQuant[g+1] |= ((byte_val >> 6) & 0x01) << i;
+                    absQuant[g+2] |= ((byte_val >> 5) & 0x01) << i;
+                    absQuant[g+3] |= ((byte_val >> 4) & 0x01) << i;
+                    absQuant[g+4] |= ((byte_val >> 3) & 0x01) << i;
+                    absQuant[g+5] |= ((byte_val >> 2) & 0x01) << i;
+                    absQuant[g+6] |= ((byte_val >> 1) & 0x01) << i;
+                    absQuant[g+7] |= ((byte_val >> 0) & 0x01) << i;
+                }
+            }
+            
+            // Reconstruction with Lorenz de-prediction
+            prevQuant = 0;
+            if(base_block_end_idx < nbEle)
+            {
+                for(int i=0; i<DBLOCK; i+=4)
+                {
+                    int sw0 = i/32, sb0 = i%32;
+                    lorenQuant = sign_flags[sw0] & (1 << (31 - sb0)) ? absQuant[i] * -1 : absQuant[i];
+                    currQuant = lorenQuant + prevQuant;
+                    prevQuant = currQuant;
+                    dec_buffer.x = currQuant * eb * 2;
+
+                    int sw1 = (i+1)/32, sb1 = (i+1)%32;
+                    lorenQuant = sign_flags[sw1] & (1 << (31 - sb1)) ? absQuant[i+1] * -1 : absQuant[i+1];
+                    currQuant = lorenQuant + prevQuant;
+                    prevQuant = currQuant;
+                    dec_buffer.y = currQuant * eb * 2;
+
+                    int sw2 = (i+2)/32, sb2 = (i+2)%32;
+                    lorenQuant = sign_flags[sw2] & (1 << (31 - sb2)) ? absQuant[i+2] * -1 : absQuant[i+2];
+                    currQuant = lorenQuant + prevQuant;
+                    prevQuant = currQuant;
+                    dec_buffer.z = currQuant * eb * 2;
+
+                    int sw3 = (i+3)/32, sb3 = (i+3)%32;
+                    lorenQuant = sign_flags[sw3] & (1 << (31 - sb3)) ? absQuant[i+3] * -1 : absQuant[i+3];
+                    currQuant = lorenQuant + prevQuant;
+                    prevQuant = currQuant;
+                    dec_buffer.w = currQuant * eb * 2;
+                    
+                    reinterpret_cast<float4*>(decData)[(base_block_start_idx+i)/4] = dec_buffer;
+                }
+            }
+            else
+            {
+                for(int i=0; i<DBLOCK; i++)
+                {
+                    int sw_i = i/32, sb_i = i%32;
+                    lorenQuant = sign_flags[sw_i] & (1 << (31 - sb_i)) ? absQuant[i] * -1 : absQuant[i];
+                    currQuant = lorenQuant + prevQuant;
+                    prevQuant = currQuant;
+                    if(base_block_start_idx+i < nbEle) decData[base_block_start_idx+i] = currQuant * eb * 2;
+                }
+            }      
+        }
+
+        cur_byte_ofs += __shfl_sync(0xffffffff, tmp_byte_ofs, 31);
+    }
+}
+
+
+// Explicit instantiations
+template __global__ void cuSZp_compress_kernel_1D_plain_f32_dblk<32>(const float* const __restrict__, unsigned char* const __restrict__, volatile unsigned int* const __restrict__, volatile unsigned int* const __restrict__, volatile int* const __restrict__, const float, const size_t);
+template __global__ void cuSZp_compress_kernel_1D_plain_f32_dblk<64>(const float* const __restrict__, unsigned char* const __restrict__, volatile unsigned int* const __restrict__, volatile unsigned int* const __restrict__, volatile int* const __restrict__, const float, const size_t);
+template __global__ void cuSZp_compress_kernel_1D_plain_f32_dblk<128>(const float* const __restrict__, unsigned char* const __restrict__, volatile unsigned int* const __restrict__, volatile unsigned int* const __restrict__, volatile int* const __restrict__, const float, const size_t);
+template __global__ void cuSZp_compress_kernel_1D_plain_f32_dblk<256>(const float* const __restrict__, unsigned char* const __restrict__, volatile unsigned int* const __restrict__, volatile unsigned int* const __restrict__, volatile int* const __restrict__, const float, const size_t);
+
+template __global__ void cuSZp_decompress_kernel_1D_plain_f32_dblk<32>(float* const __restrict__, const unsigned char* const __restrict__, volatile unsigned int* const __restrict__, volatile unsigned int* const __restrict__, volatile int* const __restrict__, const float, const size_t);
+template __global__ void cuSZp_decompress_kernel_1D_plain_f32_dblk<64>(float* const __restrict__, const unsigned char* const __restrict__, volatile unsigned int* const __restrict__, volatile unsigned int* const __restrict__, volatile int* const __restrict__, const float, const size_t);
+template __global__ void cuSZp_decompress_kernel_1D_plain_f32_dblk<128>(float* const __restrict__, const unsigned char* const __restrict__, volatile unsigned int* const __restrict__, volatile unsigned int* const __restrict__, volatile int* const __restrict__, const float, const size_t);
+template __global__ void cuSZp_decompress_kernel_1D_plain_f32_dblk<256>(float* const __restrict__, const unsigned char* const __restrict__, volatile unsigned int* const __restrict__, volatile unsigned int* const __restrict__, volatile int* const __restrict__, const float, const size_t);

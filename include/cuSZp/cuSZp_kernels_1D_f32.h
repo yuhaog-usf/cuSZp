@@ -11,4 +11,11 @@ __global__ void cuSZp_decompress_kernel_1D_plain_f32(float* const __restrict__ d
 __global__ void cuSZp_compress_kernel_1D_outlier_f32(const float* const __restrict__ oriData, unsigned char* const __restrict__ cmpData, volatile unsigned int* const __restrict__ cmpOffset, volatile unsigned int* const __restrict__ locOffset, volatile int* const __restrict__ flag, const float eb, const size_t nbEle);
 __global__ void cuSZp_decompress_kernel_1D_outlier_f32(float* const __restrict__ decData, const unsigned char* const __restrict__ cmpData, volatile unsigned int* const __restrict__ cmpOffset, volatile unsigned int* const __restrict__ locOffset, volatile int* const __restrict__ flag, const float eb, const size_t nbEle);
 
+// Template kernels for variable datablock sizes (32, 64, 128, 256).
+// DBLOCK = number of data elements per compression block.
+template <int DBLOCK>
+__global__ void cuSZp_compress_kernel_1D_plain_f32_dblk(const float* const __restrict__ oriData, unsigned char* const __restrict__ cmpData, volatile unsigned int* const __restrict__ cmpOffset, volatile unsigned int* const __restrict__ locOffset, volatile int* const __restrict__ flag, const float eb, const size_t nbEle);
+template <int DBLOCK>
+__global__ void cuSZp_decompress_kernel_1D_plain_f32_dblk(float* const __restrict__ decData, const unsigned char* const __restrict__ cmpData, volatile unsigned int* const __restrict__ cmpOffset, volatile unsigned int* const __restrict__ locOffset, volatile int* const __restrict__ flag, const float eb, const size_t nbEle);
+
 #endif // CUSZP_INCLUDE_CUSZP_CUSZP_KERNELS_1D_F32_H
