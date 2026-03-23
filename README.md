@@ -57,8 +57,8 @@ Options:
                        outlier  : Outlier fixed-length encoding mode (with delta and outlier preservation)
   -d  [dim]            Data dimensionality and processing manner. Options:
                        1                         : 1D Processing Manner (can be used for all datasets)
-                       2 [dim_z] [dim_y] [dim_z] : 2D Processing Manner (can be used for both 2D and 3D datasets)
-                       3 [dim_z] [dim_y] [dim_z] : 3D Processing Manner (can be used for only 3D datasets)
+                       2 [dim_z] [dim_y] [dim_x] : 2D Processing Manner (can be used for both 2D and 3D datasets)
+                       3 [dim_z] [dim_y] [dim_x] : 3D Processing Manner (can be used for only 3D datasets)
                        Note: dim_x is the fastest varying dimension.
                        Hint: 2D processing can be used for 3D datasets by compressing each [dim_y x dim_x] slice independently.
   -eb [errorBoundMode] [errorBound]
