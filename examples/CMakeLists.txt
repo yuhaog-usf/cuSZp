@@ -10,6 +10,7 @@ set(cuSZp_test_f32_2D "cuSZp_test_f32_2D")
 set(cuSZp_test_f64_2D "cuSZp_test_f64_2D")
 set(cuSZp_test_f32_3D "cuSZp_test_f32_3D")
 set(cuSZp_test_f64_3D "cuSZp_test_f64_3D")
+set(cuSZp_bench "cuSZp_bench")
 
 # Include the main include directory
 include_directories(${PROJECT_SOURCE_DIR}/include 
