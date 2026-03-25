@@ -79,17 +79,36 @@ static size_t compute_cmp_buffer_size(size_t nbEle)
     return gsize * blocks_per_chunk * worst_block_bytes;
 }
 
+typedef void (*compress_block_size_fn)(float*, unsigned char*, size_t, size_t*, float, int,
+                                       cudaStream_t);
+typedef void (*decompress_block_size_fn)(float*, unsigned char*, size_t, size_t, float, int,
+                                         cudaStream_t);
+typedef void (*compress_master_fn)(float*, unsigned char*, size_t, size_t*, float, cudaStream_t);
+typedef void (*decompress_master_fn)(float*, unsigned char*, size_t, size_t, float, cudaStream_t);
+
+typedef struct {
+    const char* name;
+    compress_block_size_fn compress;
+    decompress_block_size_fn decompress;
+    compress_master_fn master_compress;
+    decompress_master_fn master_decompress;
+    size_t block32_cmp_size;
+    int enabled;
+} codec_config;
+
 int main(int argc, char** argv)
 {
     char oriFilePath[640] = {0};
     char errorBoundMode[8] = {0};
+    char codecMode[16] = "both";
     float userBound = 0.0f;
     int warmup = 3;
     int repeat = 10;
 
     if (argc < 5) {
         fprintf(stderr,
-                "Usage: %s -i <datafile> -eb <rel|abs> <bound> [-w <warmup>] [-r <repeat>]\n",
+                "Usage: %s -i <datafile> -eb <rel|abs> <bound> "
+                "[-m <plain|outlier|both>] [-w <warmup>] [-r <repeat>]\n",
                 argv[0]);
         return 1;
     }
@@ -100,6 +119,8 @@ int main(int argc, char** argv)
         } else if (strcmp(argv[i], "-eb") == 0 && i + 2 < argc) {
             strncpy(errorBoundMode, argv[++i], sizeof(errorBoundMode) - 1);
             userBound = (float)atof(argv[++i]);
+        } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
+            strncpy(codecMode, argv[++i], sizeof(codecMode) - 1);
         } else if (strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
             warmup = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-r") == 0 && i + 1 < argc) {
@@ -109,6 +130,12 @@ int main(int argc, char** argv)
 
     if (strlen(oriFilePath) == 0 || strlen(errorBoundMode) == 0 || userBound == 0.0f) {
         fprintf(stderr, "Error: -i and -eb are required.\n");
+        return 1;
+    }
+    if (strcmp(codecMode, "plain") != 0 && strcmp(codecMode, "outlier") != 0 &&
+        strcmp(codecMode, "both") != 0) {
+        fprintf(stderr, "Error: unsupported -m value '%s'. Use plain, outlier, or both.\n",
+                codecMode);
         return 1;
     }
     if (warmup < 0) warmup = 0;
@@ -144,6 +171,7 @@ int main(int argc, char** argv)
     printf("  ErrMode    : %s\n", errorBoundMode);
     printf("  UserBound  : %e\n", (double)userBound);
     printf("  AbsErr     : %e\n", (double)absErr);
+    printf("  CodecMode  : %s\n", codecMode);
     printf("  Warmup     : %d\n", warmup);
     printf("  Repeat     : %d\n", repeat);
     printf("  CmpBufSize : %zu bytes\n", cmpBufSize);
@@ -179,113 +207,131 @@ int main(int argc, char** argv)
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
+    codec_config codecs[] = {
+        {"plain", cuSZp_compress_1D_plain_f32_block_size_N,
+         cuSZp_decompress_1D_plain_f32_block_size_N, cuSZp_compress_1D_plain_f32,
+         cuSZp_decompress_1D_plain_f32, 0, 0},
+        {"outlier", cuSZp_compress_1D_outlier_f32_block_size_N,
+         cuSZp_decompress_1D_outlier_f32_block_size_N, cuSZp_compress_1D_outlier_f32,
+         cuSZp_decompress_1D_outlier_f32, 0, 0},
+    };
+    int num_codecs = (int)(sizeof(codecs) / sizeof(codecs[0]));
+    for (int ci = 0; ci < num_codecs; ci++) {
+        codecs[ci].enabled = (strcmp(codecMode, "both") == 0) ||
+                             (strcmp(codecMode, codecs[ci].name) == 0);
+    }
+
     int dblock_sizes[] = {32, 64, 128, 256};
     int num_dblock_sizes = 4;
-    size_t dblock32_cmpSize = 0;
 
-    printf("%-10s  %10s  %12s  %12s  %12s  %12s  %12s  %12s  %s\n",
-           "DBlk", "CR", "Comp(GB/s)", "Comp_P95", "Decomp(GB/s)", "Dec_P95",
+    printf("%-9s  %-10s  %10s  %12s  %12s  %12s  %12s  %12s  %12s  %s\n",
+           "Codec", "DBlk", "CR", "Comp(GB/s)", "Comp_P95", "Decomp(GB/s)", "Dec_P95",
            "MaxAbsErr", "PSNR(dB)", "Check");
-    printf("----------  ----------  ------------  ------------  ------------  ------------  ------------  ------------  -----\n");
+    printf("---------  ----------  ----------  ------------  ------------  ------------  ------------  ------------  ------------  -----\n");
 
     printf("\n# CSV_START\n");
     printf("dataset,elements,valueRange,errMode,userBound,absErr,warmup,repeat,"
-           "dblockSize,cmpBytes,CR,"
+           "codec,dblockSize,cmpBytes,CR,"
            "comp_median_GBs,comp_p95_GBs,comp_min_GBs,"
            "decomp_median_GBs,decomp_p95_GBs,decomp_min_GBs,"
            "maxAbsErr,maxRelErr,PSNR\n");
 
-    for (int bi = 0; bi < num_dblock_sizes; bi++) {
-        int dbs = dblock_sizes[bi];
-        size_t cmpSize = 0;
-        float elapsed = 0.0f;
+    for (int ci = 0; ci < num_codecs; ci++) {
+        codec_config* codec = &codecs[ci];
+        if (!codec->enabled) continue;
 
-        for (int w = 0; w < warmup; w++) {
+        for (int bi = 0; bi < num_dblock_sizes; bi++) {
+            int dbs = dblock_sizes[bi];
+            size_t cmpSize = 0;
+            float elapsed = 0.0f;
+
+            for (int w = 0; w < warmup; w++) {
+                cudaMemsetAsync(d_cmpBytes, 0, cmpBufSize, stream);
+                codec->compress(d_oriData, d_cmpBytes, nbEle, &cmpSize, absErr, dbs, stream);
+                codec->decompress(d_decData, d_cmpBytes, nbEle, cmpSize, absErr, dbs, stream);
+                cudaStreamSynchronize(stream);
+            }
+
+            for (int r = 0; r < repeat; r++) {
+                cudaMemsetAsync(d_cmpBytes, 0, cmpBufSize, stream);
+                cudaStreamSynchronize(stream);
+                cudaEventRecord(start, stream);
+                codec->compress(d_oriData, d_cmpBytes, nbEle, &cmpSize, absErr, dbs, stream);
+                cudaEventRecord(stop, stream);
+                cudaEventSynchronize(stop);
+                cudaEventElapsedTime(&elapsed, start, stop);
+                comp_times[r] = elapsed;
+            }
+
+            if (cmpSize == 0 || cmpSize > cmpBufSize) {
+                printf("%-9s  %-10d  SKIP (invalid cmpSize=%zu)\n", codec->name, dbs, cmpSize);
+                continue;
+            }
+
+            cudaMemcpyAsync(cmpBytesDup, d_cmpBytes, cmpSize, cudaMemcpyDeviceToHost, stream);
             cudaMemsetAsync(d_cmpBytes, 0, cmpBufSize, stream);
-            cuSZp_compress_1D_plain_f32_block_size_N(d_oriData, d_cmpBytes, nbEle, &cmpSize,
-                                                     absErr, dbs, stream);
-            cuSZp_decompress_1D_plain_f32_block_size_N(d_decData, d_cmpBytes, nbEle, cmpSize,
-                                                       absErr, dbs, stream);
+            cudaMemcpyAsync(d_cmpBytes, cmpBytesDup, cmpSize, cudaMemcpyHostToDevice, stream);
             cudaStreamSynchronize(stream);
+
+            for (int r = 0; r < repeat; r++) {
+                cudaEventRecord(start, stream);
+                codec->decompress(d_decData, d_cmpBytes, nbEle, cmpSize, absErr, dbs, stream);
+                cudaEventRecord(stop, stream);
+                cudaEventSynchronize(stop);
+                cudaEventElapsedTime(&elapsed, start, stop);
+                decomp_times[r] = elapsed;
+            }
+
+            cudaMemcpy(decData, d_decData, rawBytes, cudaMemcpyDeviceToHost);
+            quality_t q = check_quality(oriData, decData, nbEle);
+            pstats cs = compute_pstats(comp_times, repeat);
+            pstats ds = compute_pstats(decomp_times, repeat);
+
+            if (dbs == 32) codec->block32_cmp_size = cmpSize;
+
+            double cr = (double)rawBytes / (double)cmpSize;
+            double comp_gbs = rawMiB / cs.median;
+            double comp_p95_gbs = rawMiB / cs.p95;
+            double comp_min_gbs = rawMiB / cs.max;
+            double dec_gbs = rawMiB / ds.median;
+            double dec_p95_gbs = rawMiB / ds.p95;
+            double dec_min_gbs = rawMiB / ds.max;
+            const char* check_str = (q.max_abs_err <= absErr * 1.01f) ? "PASS" : "FAIL";
+            const char* dblk_label =
+                (dbs == 32) ? "32(base)" : (dbs == 64) ? "64" : (dbs == 128) ? "128" : "256";
+
+            printf("%-9s  %-10s  %10.2f  %12.2f  %12.2f  %12.2f  %12.2f  %12.2e  %12.1f  %s\n",
+                   codec->name, dblk_label, cr, comp_gbs, comp_p95_gbs, dec_gbs, dec_p95_gbs,
+                   q.max_abs_err, q.psnr, check_str);
+
+            printf("%s,%zu,%.6e,%s,%e,%e,%d,%d,"
+                   "%s,%d,%zu,%.4f,"
+                   "%.4f,%.4f,%.4f,"
+                   "%.4f,%.4f,%.4f,"
+                   "%.6e,%.6e,%.1f\n",
+                   oriFilePath, nbEle, (double)valueRange, errorBoundMode, (double)userBound,
+                   (double)absErr, warmup, repeat, codec->name, dbs, cmpSize, cr, comp_gbs,
+                   comp_p95_gbs, comp_min_gbs, dec_gbs, dec_p95_gbs, dec_min_gbs,
+                   q.max_abs_err, q.max_rel_err, q.psnr);
         }
-
-        for (int r = 0; r < repeat; r++) {
-            cudaMemsetAsync(d_cmpBytes, 0, cmpBufSize, stream);
-            cudaStreamSynchronize(stream);
-            cudaEventRecord(start, stream);
-            cuSZp_compress_1D_plain_f32_block_size_N(d_oriData, d_cmpBytes, nbEle, &cmpSize,
-                                                     absErr, dbs, stream);
-            cudaEventRecord(stop, stream);
-            cudaEventSynchronize(stop);
-            cudaEventElapsedTime(&elapsed, start, stop);
-            comp_times[r] = elapsed;
-        }
-
-        if (cmpSize == 0 || cmpSize > cmpBufSize) {
-            printf("%-10d  SKIP (invalid cmpSize=%zu)\n", dbs, cmpSize);
-            continue;
-        }
-
-        cudaMemcpyAsync(cmpBytesDup, d_cmpBytes, cmpSize, cudaMemcpyDeviceToHost, stream);
-        cudaMemsetAsync(d_cmpBytes, 0, cmpBufSize, stream);
-        cudaMemcpyAsync(d_cmpBytes, cmpBytesDup, cmpSize, cudaMemcpyHostToDevice, stream);
-        cudaStreamSynchronize(stream);
-
-        for (int r = 0; r < repeat; r++) {
-            cudaEventRecord(start, stream);
-            cuSZp_decompress_1D_plain_f32_block_size_N(d_decData, d_cmpBytes, nbEle, cmpSize,
-                                                       absErr, dbs, stream);
-            cudaEventRecord(stop, stream);
-            cudaEventSynchronize(stop);
-            cudaEventElapsedTime(&elapsed, start, stop);
-            decomp_times[r] = elapsed;
-        }
-
-        cudaMemcpy(decData, d_decData, rawBytes, cudaMemcpyDeviceToHost);
-        quality_t q = check_quality(oriData, decData, nbEle);
-        pstats cs = compute_pstats(comp_times, repeat);
-        pstats ds = compute_pstats(decomp_times, repeat);
-
-        if (dbs == 32) dblock32_cmpSize = cmpSize;
-
-        double cr = (double)rawBytes / (double)cmpSize;
-        double comp_gbs = rawMiB / cs.median;
-        double comp_p95_gbs = rawMiB / cs.p95;
-        double comp_min_gbs = rawMiB / cs.max;
-        double dec_gbs = rawMiB / ds.median;
-        double dec_p95_gbs = rawMiB / ds.p95;
-        double dec_min_gbs = rawMiB / ds.max;
-        const char* check_str = (q.max_abs_err <= absErr * 1.01f) ? "PASS" : "FAIL";
-        const char* dblk_label = (dbs == 32) ? "32(base)" : (dbs == 64) ? "64" : (dbs == 128) ? "128" : "256";
-
-        printf("%-10s  %10.2f  %12.2f  %12.2f  %12.2f  %12.2f  %12.2e  %12.1f  %s\n",
-               dblk_label, cr, comp_gbs, comp_p95_gbs, dec_gbs, dec_p95_gbs,
-               q.max_abs_err, q.psnr, check_str);
-
-        printf("%s,%zu,%.6e,%s,%e,%e,%d,%d,"
-               "%d,%zu,%.4f,"
-               "%.4f,%.4f,%.4f,"
-               "%.4f,%.4f,%.4f,"
-               "%.6e,%.6e,%.1f\n",
-               oriFilePath, nbEle, (double)valueRange,
-               errorBoundMode, (double)userBound, (double)absErr, warmup, repeat,
-               dbs, cmpSize, cr,
-               comp_gbs, comp_p95_gbs, comp_min_gbs,
-               dec_gbs, dec_p95_gbs, dec_min_gbs,
-               q.max_abs_err, q.max_rel_err, q.psnr);
     }
 
-    {
+    for (int ci = 0; ci < num_codecs; ci++) {
+        codec_config* codec = &codecs[ci];
         size_t baselineCmpSize = 0;
+        quality_t baselineQ;
+
+        if (!codec->enabled) continue;
+
         cudaMemsetAsync(d_cmpBytes, 0, cmpBufSize, stream);
-        cuSZp_compress_1D_plain_f32(d_oriData, d_cmpBytes, nbEle, &baselineCmpSize, absErr, stream);
-        cuSZp_decompress_1D_plain_f32(d_decData, d_cmpBytes, nbEle, baselineCmpSize, absErr, stream);
+        codec->master_compress(d_oriData, d_cmpBytes, nbEle, &baselineCmpSize, absErr, stream);
+        codec->master_decompress(d_decData, d_cmpBytes, nbEle, baselineCmpSize, absErr, stream);
         cudaStreamSynchronize(stream);
         cudaMemcpy(decData, d_decData, rawBytes, cudaMemcpyDeviceToHost);
-        quality_t baselineQ = check_quality(oriData, decData, nbEle);
-        printf("# BASELINE_CHECK master_plain_cmpBytes=%zu block_size_N_32_cmpBytes=%zu cmpSizeMatch=%s maxAbsErr=%.6e\n",
-               baselineCmpSize, dblock32_cmpSize,
-               (baselineCmpSize == dblock32_cmpSize) ? "YES" : "NO",
+        baselineQ = check_quality(oriData, decData, nbEle);
+        printf("# BASELINE_CHECK codec=%s master_cmpBytes=%zu block_size_N_32_cmpBytes=%zu cmpSizeMatch=%s maxAbsErr=%.6e\n",
+               codec->name, baselineCmpSize, codec->block32_cmp_size,
+               (baselineCmpSize == codec->block32_cmp_size) ? "YES" : "NO",
                baselineQ.max_abs_err);
     }
 
