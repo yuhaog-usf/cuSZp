@@ -43,11 +43,13 @@ set(cuSZp_SOURCES
     src/cuSZp_utility.cu
     src/cuSZp_timer.cu
     src/cuSZp_entry_1D_f32.cu
+    src/cuSZp_entry_1D_f32_block_size_N.cu
     src/cuSZp_entry_1D_f64.cu
     src/cuSZp_entry_2D_f32.cu
     src/cuSZp_entry_2D_f64.cu
     src/cuSZp_entry_3D_f32.cu
     src/cuSZp_entry_3D_f64.cu
+    src/cuSZp_kernels_1D_f32_block_size_N.cu
     src/cuSZp.cu
 )
 
