@@ -10,7 +10,7 @@ set(cuSZp_test_f32_2D "cuSZp_test_f32_2D")
 set(cuSZp_test_f64_2D "cuSZp_test_f64_2D")
 set(cuSZp_test_f32_3D "cuSZp_test_f32_3D")
 set(cuSZp_test_f64_3D "cuSZp_test_f64_3D")
-set(cuSZp_bench "cuSZp_bench")
+set(cuSZp_bench_1D_f32_plain "cuSZp_bench_1D_f32_plain")
 
 # Include the main include directory
 include_directories(${PROJECT_SOURCE_DIR}/include 
@@ -24,6 +24,7 @@ add_executable(${cuSZp_test_f32_2D} cuSZp_test_f32_2D.cpp)
 add_executable(${cuSZp_test_f64_2D} cuSZp_test_f64_2D.cpp)
 add_executable(${cuSZp_test_f32_3D} cuSZp_test_f32_3D.cpp)
 add_executable(${cuSZp_test_f64_3D} cuSZp_test_f64_3D.cpp)
+add_executable(${cuSZp_bench_1D_f32_plain} cuSZp_bench_1D_f32_plain.cpp)
 
 # Link the existing cuSZp_static library
 target_link_libraries(${cuSZp} PRIVATE cuSZp_static)
@@ -33,6 +34,7 @@ target_link_libraries(${cuSZp_test_f32_2D} PRIVATE cuSZp_static)
 target_link_libraries(${cuSZp_test_f64_2D} PRIVATE cuSZp_static)
 target_link_libraries(${cuSZp_test_f32_3D} PRIVATE cuSZp_static)
 target_link_libraries(${cuSZp_test_f64_3D} PRIVATE cuSZp_static)
+target_link_libraries(${cuSZp_bench_1D_f32_plain} PRIVATE cuSZp_static)
 
 # Set output paths for the compiled binary
 set_target_properties(${cuSZp} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${install_dir})
@@ -42,6 +44,7 @@ set_target_properties(${cuSZp_test_f32_2D} PROPERTIES RUNTIME_OUTPUT_DIRECTORY $
 set_target_properties(${cuSZp_test_f64_2D} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${install_dir})
 set_target_properties(${cuSZp_test_f32_3D} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${install_dir})
 set_target_properties(${cuSZp_test_f64_3D} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${install_dir})
+set_target_properties(${cuSZp_bench_1D_f32_plain} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${install_dir})
 
 # Set installation paths for the compiled binary
 install(TARGETS ${cuSZp} DESTINATION bin)
@@ -51,3 +54,4 @@ install(TARGETS ${cuSZp_test_f32_2D} DESTINATION bin)
 install(TARGETS ${cuSZp_test_f64_2D} DESTINATION bin)
 install(TARGETS ${cuSZp_test_f32_3D} DESTINATION bin)
 install(TARGETS ${cuSZp_test_f64_3D} DESTINATION bin)
+install(TARGETS ${cuSZp_bench_1D_f32_plain} DESTINATION bin)
