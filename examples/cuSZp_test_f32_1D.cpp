@@ -138,8 +138,8 @@ int main()
 
     // Print result.
     printf("cuSZp-p finished!\n");
-    printf("cuSZp-p compression   end-to-end speed: %f GB/s\n", (nbEle*sizeof(float)/1024.0/1024.0)/cmpTime);
-    printf("cuSZp-p decompression end-to-end speed: %f GB/s\n", (nbEle*sizeof(float)/1024.0/1024.0)/decTime);
+    // printf("cuSZp-p compression   end-to-end speed: %f GB/s\n", (nbEle*sizeof(float)/1024.0/1024.0)/cmpTime);
+    // printf("cuSZp-p decompression end-to-end speed: %f GB/s\n", (nbEle*sizeof(float)/1024.0/1024.0)/decTime);
     printf("cuSZp-p compression ratio: %f\n", (nbEle*sizeof(float)/1024.0/1024.0)/(cmpSize2*sizeof(unsigned char)/1024.0/1024.0));
     
     // Error check

@@ -1,5 +1,6 @@
 #include "cuSZp_entry_1D_f32.h"
 #include "cuSZp_kernels_1D_f32.h"
+#include <stdio.h>
 
 /** ************************************************************************
  * @brief cuSZp end-to-end compression API for device pointers
@@ -38,7 +39,7 @@ void cuSZp_compress_1D_fixed_f32(float* d_oriData, unsigned char* d_cmpBytes, si
     dim3 gridSize(gsize);
     cuSZp_compress_kernel_1D_fixed_f32<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_oriData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
 
-    // Obtain compression ratio and move data back to CPU.  
+    // Obtain compression ratio and move data back to CPU.
     cudaMemcpy(&glob_sync, d_cmpOffset+cmpOffSize-1, sizeof(unsigned int), cudaMemcpyDeviceToHost);
     *cmpSize = (size_t)glob_sync + (nbEle+tblock_size*thread_chunk-1)/(tblock_size*thread_chunk)*(tblock_size*thread_chunk)/32;
 
@@ -84,7 +85,7 @@ void cuSZp_decompress_1D_fixed_f32(float* d_decData, unsigned char* d_cmpBytes, 
     dim3 blockSize(bsize);
     dim3 gridSize(gsize);
     cuSZp_decompress_kernel_1D_fixed_f32<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_decData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
-    
+
     // Free memory that is used.
     cudaFree(d_cmpOffset);
     cudaFree(d_locOffset);
@@ -126,9 +127,20 @@ void cuSZp_compress_1D_plain_f32(float* d_oriData, unsigned char* d_cmpBytes, si
     // cuSZp GPU compression.
     dim3 blockSize(bsize);
     dim3 gridSize(gsize);
+    cudaEvent_t kernel_start, kernel_stop;
+    cudaEventCreate(&kernel_start);
+    cudaEventCreate(&kernel_stop);
+    cudaEventRecord(kernel_start, stream);
     cuSZp_compress_kernel_1D_plain_f32<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_oriData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
+    cudaEventRecord(kernel_stop, stream);
+    cudaEventSynchronize(kernel_stop);
+    float kernelTimeMs;
+    cudaEventElapsedTime(&kernelTimeMs, kernel_start, kernel_stop);
+    printf("cuSZp-p compression   kernel-only speed: %f GB/s\n", (nbEle*sizeof(float)/1024.0/1024.0)/kernelTimeMs);
+    cudaEventDestroy(kernel_start);
+    cudaEventDestroy(kernel_stop);
 
-    // Obtain compression ratio and move data back to CPU.  
+    // Obtain compression ratio and move data back to CPU.
     cudaMemcpy(&glob_sync, d_cmpOffset+cmpOffSize-1, sizeof(unsigned int), cudaMemcpyDeviceToHost);
     *cmpSize = (size_t)glob_sync + (nbEle+tblock_size*thread_chunk-1)/(tblock_size*thread_chunk)*(tblock_size*thread_chunk)/32;
 
@@ -173,8 +185,19 @@ void cuSZp_decompress_1D_plain_f32(float* d_decData, unsigned char* d_cmpBytes, 
     // cuSZp GPU decompression.
     dim3 blockSize(bsize);
     dim3 gridSize(gsize);
+    cudaEvent_t kernel_start, kernel_stop;
+    cudaEventCreate(&kernel_start);
+    cudaEventCreate(&kernel_stop);
+    cudaEventRecord(kernel_start, stream);
     cuSZp_decompress_kernel_1D_plain_f32<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_decData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
-    
+    cudaEventRecord(kernel_stop, stream);
+    cudaEventSynchronize(kernel_stop);
+    float kernelTimeMs;
+    cudaEventElapsedTime(&kernelTimeMs, kernel_start, kernel_stop);
+    printf("cuSZp-p decompression kernel-only speed: %f GB/s\n", (nbEle*sizeof(float)/1024.0/1024.0)/kernelTimeMs);
+    cudaEventDestroy(kernel_start);
+    cudaEventDestroy(kernel_stop);
+
     // Free memory that is used.
     cudaFree(d_cmpOffset);
     cudaFree(d_locOffset);
@@ -218,7 +241,7 @@ void cuSZp_compress_1D_outlier_f32(float* d_oriData, unsigned char* d_cmpBytes, 
     dim3 gridSize(gsize);
     cuSZp_compress_kernel_1D_outlier_f32<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_oriData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
 
-    // Obtain compression ratio and move data back to CPU.  
+    // Obtain compression ratio and move data back to CPU.
     cudaMemcpy(&glob_sync, d_cmpOffset+cmpOffSize-1, sizeof(unsigned int), cudaMemcpyDeviceToHost);
     *cmpSize = (size_t)glob_sync + (nbEle+tblock_size*thread_chunk-1)/(tblock_size*thread_chunk)*(tblock_size*thread_chunk)/32;
 
@@ -264,7 +287,7 @@ void cuSZp_decompress_1D_outlier_f32(float* d_decData, unsigned char* d_cmpBytes
     dim3 blockSize(bsize);
     dim3 gridSize(gsize);
     cuSZp_decompress_kernel_1D_outlier_f32<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_decData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
-    
+
     // Free memory that is used.
     cudaFree(d_cmpOffset);
     cudaFree(d_locOffset);
