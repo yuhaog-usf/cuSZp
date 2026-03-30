@@ -115,6 +115,14 @@ int main()
     else printf("\033[0;31mFail error check! Exceeding data count: %d\033[0m\n", not_bound);
     printf("\033[1mDone with testing cuSZp-f on REL 1E-2!\033[0m\n\n");
 
+    // Warmup for plain kernel.
+    for(int i=0; i<3; i++)
+    {
+        cuSZp_compress_1D_plain_f32(d_oriData, d_cmpBytes, nbEle, &cmpSize2, errorBound, stream);
+        cuSZp_decompress_1D_plain_f32(d_decData, d_cmpBytes, nbEle, cmpSize2, errorBound, stream);
+        cudaMemset(d_cmpBytes, 0, sizeof(float)*nbEle);
+    }
+
     // cuSZp-p testing.
     printf("=================================================\n");
     printf("========Testing cuSZp-p-1D-f32 on REL 1E-2=======\n");

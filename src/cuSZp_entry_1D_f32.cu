@@ -105,7 +105,7 @@ void cuSZp_decompress_1D_fixed_f32(float* d_decData, unsigned char* d_cmpBytes, 
  * @param   errorBound      user-defined error bound
  * @param   stream          CUDA stream for executing compression kernel
  * *********************************************************************** */
-void cuSZp_compress_1D_plain_f32(float* d_oriData, unsigned char* d_cmpBytes, size_t nbEle, size_t* cmpSize, float errorBound, cudaStream_t stream)
+void cuSZp_compress_1D_plain_f32(float* d_oriData, unsigned char* d_cmpBytes, size_t nbEle, size_t* cmpSize, float errorBound, cudaStream_t stream, float* kernelTimeMs)
 {
     // Data blocking.
     int bsize = tblock_size;
@@ -128,17 +128,21 @@ void cuSZp_compress_1D_plain_f32(float* d_oriData, unsigned char* d_cmpBytes, si
     dim3 blockSize(bsize);
     dim3 gridSize(gsize);
     cudaEvent_t kernel_start, kernel_stop;
-    cudaEventCreate(&kernel_start);
-    cudaEventCreate(&kernel_stop);
-    cudaEventRecord(kernel_start, stream);
+    if (kernelTimeMs)
+    {
+        cudaEventCreate(&kernel_start);
+        cudaEventCreate(&kernel_stop);
+        cudaEventRecord(kernel_start, stream);
+    }
     cuSZp_compress_kernel_1D_plain_f32<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_oriData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
-    cudaEventRecord(kernel_stop, stream);
-    cudaEventSynchronize(kernel_stop);
-    float kernelTimeMs;
-    cudaEventElapsedTime(&kernelTimeMs, kernel_start, kernel_stop);
-    printf("cuSZp-p compression   kernel-only speed: %f GB/s\n", (nbEle*sizeof(float)/1024.0/1024.0)/kernelTimeMs);
-    cudaEventDestroy(kernel_start);
-    cudaEventDestroy(kernel_stop);
+    if (kernelTimeMs)
+    {
+        cudaEventRecord(kernel_stop, stream);
+        cudaEventSynchronize(kernel_stop);
+        cudaEventElapsedTime(kernelTimeMs, kernel_start, kernel_stop);
+        cudaEventDestroy(kernel_start);
+        cudaEventDestroy(kernel_stop);
+    }
 
     // Obtain compression ratio and move data back to CPU.
     cudaMemcpy(&glob_sync, d_cmpOffset+cmpOffSize-1, sizeof(unsigned int), cudaMemcpyDeviceToHost);
@@ -164,7 +168,7 @@ void cuSZp_compress_1D_plain_f32(float* d_oriData, unsigned char* d_cmpBytes, si
  * @param   errorBound      user-defined error bound
  * @param   stream          CUDA stream for executing compression kernel
  * *********************************************************************** */
-void cuSZp_decompress_1D_plain_f32(float* d_decData, unsigned char* d_cmpBytes, size_t nbEle, size_t cmpSize, float errorBound, cudaStream_t stream)
+void cuSZp_decompress_1D_plain_f32(float* d_decData, unsigned char* d_cmpBytes, size_t nbEle, size_t cmpSize, float errorBound, cudaStream_t stream, float* kernelTimeMs)
 {
     // Data blocking.
     int bsize = tblock_size;
@@ -186,17 +190,21 @@ void cuSZp_decompress_1D_plain_f32(float* d_decData, unsigned char* d_cmpBytes, 
     dim3 blockSize(bsize);
     dim3 gridSize(gsize);
     cudaEvent_t kernel_start, kernel_stop;
-    cudaEventCreate(&kernel_start);
-    cudaEventCreate(&kernel_stop);
-    cudaEventRecord(kernel_start, stream);
+    if (kernelTimeMs)
+    {
+        cudaEventCreate(&kernel_start);
+        cudaEventCreate(&kernel_stop);
+        cudaEventRecord(kernel_start, stream);
+    }
     cuSZp_decompress_kernel_1D_plain_f32<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_decData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
-    cudaEventRecord(kernel_stop, stream);
-    cudaEventSynchronize(kernel_stop);
-    float kernelTimeMs;
-    cudaEventElapsedTime(&kernelTimeMs, kernel_start, kernel_stop);
-    printf("cuSZp-p decompression kernel-only speed: %f GB/s\n", (nbEle*sizeof(float)/1024.0/1024.0)/kernelTimeMs);
-    cudaEventDestroy(kernel_start);
-    cudaEventDestroy(kernel_stop);
+    if (kernelTimeMs)
+    {
+        cudaEventRecord(kernel_stop, stream);
+        cudaEventSynchronize(kernel_stop);
+        cudaEventElapsedTime(kernelTimeMs, kernel_start, kernel_stop);
+        cudaEventDestroy(kernel_start);
+        cudaEventDestroy(kernel_stop);
+    }
 
     // Free memory that is used.
     cudaFree(d_cmpOffset);
