@@ -92,15 +92,11 @@ int main(int argc, char **argv)
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-
     float *comp_times = (float *)malloc((size_t)repeat * sizeof(float));
     float *decomp_times = (float *)malloc((size_t)repeat * sizeof(float));
 
     size_t cmpSize = 0;
-    float elapsed = 0.0f;
+    float kernelTimeMs = 0.0f;
 
     // Warmup.
     for (int w = 0; w < warmup; w++) {
@@ -110,16 +106,12 @@ int main(int argc, char **argv)
         cudaStreamSynchronize(stream);
     }
 
-    // Timed compression runs.
+    // Timed compression runs (kernel-only).
     for (int r = 0; r < repeat; r++) {
         cudaMemsetAsync(d_cmpBytes, 0, rawBytes, stream);
         cudaStreamSynchronize(stream);
-        cudaEventRecord(start, stream);
-        cuSZp_compress_1D_plain_f32(d_oriData, d_cmpBytes, nbEle, &cmpSize, absErr, stream);
-        cudaEventRecord(stop, stream);
-        cudaEventSynchronize(stop);
-        cudaEventElapsedTime(&elapsed, start, stop);
-        comp_times[r] = elapsed;
+        cuSZp_compress_1D_plain_f32(d_oriData, d_cmpBytes, nbEle, &cmpSize, absErr, stream, &kernelTimeMs);
+        comp_times[r] = kernelTimeMs;
     }
 
     if (cmpSize == 0 || cmpSize > rawBytes) {
@@ -136,14 +128,10 @@ int main(int argc, char **argv)
     cudaMemcpyAsync(d_cmpBytes, cmpBytes_dup, cmpSize, cudaMemcpyHostToDevice, stream);
     cudaStreamSynchronize(stream);
 
-    // Timed decompression runs.
+    // Timed decompression runs (kernel-only).
     for (int r = 0; r < repeat; r++) {
-        cudaEventRecord(start, stream);
-        cuSZp_decompress_1D_plain_f32(d_decData, d_cmpBytes, nbEle, cmpSize, absErr, stream);
-        cudaEventRecord(stop, stream);
-        cudaEventSynchronize(stop);
-        cudaEventElapsedTime(&elapsed, start, stop);
-        decomp_times[r] = elapsed;
+        cuSZp_decompress_1D_plain_f32(d_decData, d_cmpBytes, nbEle, cmpSize, absErr, stream, &kernelTimeMs);
+        decomp_times[r] = kernelTimeMs;
     }
 
     // Compute median.
@@ -180,8 +168,6 @@ int main(int argc, char **argv)
     free(cmpBytes_dup);
     free(comp_times);
     free(decomp_times);
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
     cudaFree(d_oriData);
     cudaFree(d_decData);
     cudaFree(d_cmpBytes);
