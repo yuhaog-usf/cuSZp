@@ -12,6 +12,7 @@
 #include <cuda_runtime.h>
 #include <cuSZp/cuSZp_entry_1D_f32.h>
 #include <cuSZp/cuSZp_utility.h>
+#include <cuSZp/cuSZp_timer.h>
 
 static int cmp_float(const void *a, const void *b)
 {
@@ -92,15 +93,12 @@ int main(int argc, char **argv)
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
+    TimingGPU timer_GPU;
 
     float *comp_times = (float *)malloc((size_t)repeat * sizeof(float));
     float *decomp_times = (float *)malloc((size_t)repeat * sizeof(float));
 
     size_t cmpSize = 0;
-    float elapsed = 0.0f;
 
     // Warmup.
     for (int w = 0; w < warmup; w++) {
@@ -114,12 +112,9 @@ int main(int argc, char **argv)
     for (int r = 0; r < repeat; r++) {
         cudaMemsetAsync(d_cmpBytes, 0, rawBytes, stream);
         cudaStreamSynchronize(stream);
-        cudaEventRecord(start, stream);
+        timer_GPU.StartCounter();
         cuSZp_compress_1D_plain_f32(d_oriData, d_cmpBytes, nbEle, &cmpSize, absErr, stream);
-        cudaEventRecord(stop, stream);
-        cudaEventSynchronize(stop);
-        cudaEventElapsedTime(&elapsed, start, stop);
-        comp_times[r] = elapsed;
+        comp_times[r] = timer_GPU.GetCounter();
     }
 
     if (cmpSize == 0 || cmpSize > rawBytes) {
@@ -138,12 +133,9 @@ int main(int argc, char **argv)
 
     // Timed decompression runs.
     for (int r = 0; r < repeat; r++) {
-        cudaEventRecord(start, stream);
+        timer_GPU.StartCounter();
         cuSZp_decompress_1D_plain_f32(d_decData, d_cmpBytes, nbEle, cmpSize, absErr, stream);
-        cudaEventRecord(stop, stream);
-        cudaEventSynchronize(stop);
-        cudaEventElapsedTime(&elapsed, start, stop);
-        decomp_times[r] = elapsed;
+        decomp_times[r] = timer_GPU.GetCounter();
     }
 
     // Compute median.
@@ -180,8 +172,6 @@ int main(int argc, char **argv)
     free(cmpBytes_dup);
     free(comp_times);
     free(decomp_times);
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
     cudaFree(d_oriData);
     cudaFree(d_decData);
     cudaFree(d_cmpBytes);

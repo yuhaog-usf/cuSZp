@@ -133,7 +133,7 @@ void cuSZp_compress_1D_plain_f32(float* d_oriData, unsigned char* d_cmpBytes, si
     *cmpSize = (size_t)glob_sync + (nbEle+tblock_size*thread_chunk-1)/(tblock_size*thread_chunk)*(tblock_size*thread_chunk)/32;
 
     // Free memory that is used.
-    cudaFree(d_cmpOffset);
+    cudaFree(d_cmpOffset); // 隐式同步
     cudaFree(d_locOffset);
     cudaFree(d_flag);
 }
@@ -176,7 +176,7 @@ void cuSZp_decompress_1D_plain_f32(float* d_decData, unsigned char* d_cmpBytes, 
     cuSZp_decompress_kernel_1D_plain_f32<<<gridSize, blockSize, sizeof(unsigned int)*2, stream>>>(d_decData, d_cmpBytes, d_cmpOffset, d_locOffset, d_flag, errorBound, nbEle);
     
     // Free memory that is used.
-    cudaFree(d_cmpOffset);
+    cudaFree(d_cmpOffset); // 隐式同步
     cudaFree(d_locOffset);
     cudaFree(d_flag);
 }
